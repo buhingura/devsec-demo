@@ -1,0 +1,67 @@
+{% extends 'idan_muteruz/base.html' %}
+
+{% block title %}Create account{% endblock %}
+
+{% block auth_card %}
+<div class="auth-card" style="max-width:500px;">
+    <div class="auth-card-head">
+        <div class="auth-brand">dan</div>
+        <div class="auth-brand-sub">Security Dashboard</div>
+    </div>
+
+    <div class="auth-card-body">
+        <h1>Create account</h1>
+        <p class="auth-subtitle">Fill in the details below to get started</p>
+
+        <form method="post" novalidate>
+            {% csrf_token %}
+
+            {% if form.non_field_errors %}
+                <div class="ferrors-box">{{ form.non_field_errors }}</div>
+            {% endif %}
+
+            <!-- Name row -->
+            <div class="grid-2">
+                <div class="fgroup">
+                    {{ form.first_name.label_tag }}
+                    {{ form.first_name }}
+                    {% if form.first_name.errors %}
+                        <div class="ferror">{{ form.first_name.errors|striptags }}</div>
+                    {% endif %}
+                </div>
+                <div class="fgroup">
+                    {{ form.last_name.label_tag }}
+                    {{ form.last_name }}
+                    {% if form.last_name.errors %}
+                        <div class="ferror">{{ form.last_name.errors|striptags }}</div>
+                    {% endif %}
+                </div>
+            </div>
+
+            <!-- Remaining fields (username, email, password1, password2) -->
+            {% for field in form %}
+                {% if field.name != 'first_name' and field.name != 'last_name' %}
+                    <div class="fgroup">
+                        {{ field.label_tag }}
+                        {{ field }}
+                        {% if field.help_text %}
+                            <div class="fhelp">{{ field.help_text }}</div>
+                        {% endif %}
+                        {% if field.errors %}
+                            <div class="ferror">{{ field.errors|striptags }}</div>
+                        {% endif %}
+                    </div>
+                {% endif %}
+            {% endfor %}
+
+            <div style="margin-top:1.25rem;">
+                <button type="submit" class="btn btn-primary btn-full">Create account</button>
+            </div>
+        </form>
+    </div>
+
+    <div class="auth-foot">
+        Already have an account? <a href="{% url 'idan_muteruz:login' %}">Sign in</a>
+    </div>
+</div>
+{% endblock %}

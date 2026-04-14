@@ -1,0 +1,49 @@
+{% extends 'idan_muteruz/base.html' %}
+
+{% block title %}Sign in{% endblock %}
+
+{% block auth_card %}
+<div class="auth-card">
+    <div class="auth-card-head">
+        <div class="auth-brand">dan</div>
+        <div class="auth-brand-sub">Security Dashboard</div>
+    </div>
+
+    <div class="auth-card-body">
+        <h1>Welcome back</h1>
+        <p class="auth-subtitle">Sign in to your account to continue</p>
+
+        <form method="post" novalidate>
+            {% csrf_token %}
+
+            {% if form.non_field_errors %}
+                <div class="ferrors-box">{{ form.non_field_errors }}</div>
+            {% endif %}
+
+            <div class="fgroup">
+                {{ form.username.label_tag }}
+                {{ form.username }}
+                {% if form.username.errors %}
+                    <div class="ferror">{{ form.username.errors|striptags }}</div>
+                {% endif %}
+            </div>
+
+            <div class="fgroup">
+                {{ form.password.label_tag }}
+                {{ form.password }}
+                {% if form.password.errors %}
+                    <div class="ferror">{{ form.password.errors|striptags }}</div>
+                {% endif %}
+            </div>
+
+            <div style="margin-top:1.25rem;">
+                <button type="submit" class="btn btn-primary btn-full">Sign in</button>
+            </div>
+        </form>
+    </div>
+
+    <div class="auth-foot">
+        Don't have an account? <a href="{% url 'idan_muteruz:register' %}">Create one</a>
+    </div>
+</div>
+{% endblock %}
