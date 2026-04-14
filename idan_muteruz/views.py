@@ -2,7 +2,15 @@ from django.contrib import messages
 from django.contrib.auth import get_user_model, login
 from django.contrib.auth.mixins import LoginRequiredMixin
 from django.contrib.auth.models import Group
-from django.contrib.auth.views import LoginView, LogoutView, PasswordChangeView
+from django.contrib.auth.views import (
+    LoginView,
+    LogoutView,
+    PasswordChangeView,
+    PasswordResetView as BasePasswordResetView,
+    PasswordResetDoneView as BasePasswordResetDoneView,
+    PasswordResetConfirmView as BasePasswordResetConfirmView,
+    PasswordResetCompleteView as BasePasswordResetCompleteView,
+)
 from django.contrib.messages.views import SuccessMessageMixin
 from django.core.exceptions import PermissionDenied
 from django.shortcuts import get_object_or_404, redirect
@@ -159,6 +167,84 @@ class AdminPanelView(PrivilegedAccessMixin, TemplateView):
                 for u in users_qs
             ]
         return context
+
+
+# ---------------------------------------------------------------------------
+# Password reset — 4-step flow
+# ---------------------------------------------------------------------------
+
+class UserPasswordResetView(BasePasswordResetView):
+    """
+    Step 1 — the user enters their email address.
+
+    Security design:
+    · Django's PasswordResetView only sends mail when the address belongs to
+      an *active* user with a usable password.  We do not alter this behaviour.
+    · success_url always points to the same "sent" page regardless of whether
+      the address exists — this prevents account enumeration (an attacker
+      cannot distinguish "email found" from "email not found").
+    · Authenticated users are redirected to the dashboard; they should use
+      the normal password-change flow (/password/change/) instead.
+    · Tokens are produced by Django's PasswordResetTokenGenerator:
+      HMAC-SHA256 over (user pk, password hash, last-login timestamp, current
+      timestamp).  They are bound to the account state and expire after
+      PASSWORD_RESET_TIMEOUT seconds (configured to 1 hour).
+    """
+
+    template_name        = 'idan_muteruz/password_reset_request.html'
+    email_template_name  = 'idan_muteruz/email/password_reset_body.txt'
+    subject_template_name = 'idan_muteruz/email/password_reset_subject.txt'
+    success_url          = reverse_lazy('idan_muteruz:password_reset_sent')
+    from_email           = None  # falls back to settings.DEFAULT_FROM_EMAIL
+
+    def dispatch(self, request, *args, **kwargs):
+        # Authenticated users already have a working account; redirect them to
+        # the dashboard so they use the explicit password-change view instead.
+        if request.user.is_authenticated:
+            return redirect('idan_muteruz:dashboard')
+        return super().dispatch(request, *args, **kwargs)
+
+
+class UserPasswordResetSentView(BasePasswordResetDoneView):
+    """
+    Step 2 — always displayed after the form is submitted.
+
+    Shown regardless of whether the submitted email belongs to a real account.
+    The identical response for both cases is the primary anti-enumeration guard:
+    an attacker cannot infer which email addresses are registered.
+    """
+
+    template_name = 'idan_muteruz/password_reset_sent.html'
+
+
+class UserPasswordResetConfirmView(BasePasswordResetConfirmView):
+    """
+    Step 3 — validates the uidb64/token pair from the reset link and presents
+    the new-password form if the link is valid.
+
+    Security design:
+    · Token validation (HMAC check + expiry) is handled entirely by Django.
+    · Django stores the validated token in the session and redirects to a
+      token-free URL (<uidb64>/set-password/), so the token never appears in
+      the Referer header when the password form is submitted.
+    · post_reset_login=False — the user must explicitly sign in after resetting.
+      Auto-login after reset would let anyone who intercepts the email link
+      silently gain a session without knowing the previous password.
+    · Tokens are single-use: the generator checks the password hash, so the
+      moment the password is saved the old token is implicitly invalidated.
+    · Invalid or expired links surface a clear message via the template's
+      `validlink` context flag — no stack traces or verbose errors.
+    """
+
+    template_name = 'idan_muteruz/password_reset_confirm.html'
+    success_url   = reverse_lazy('idan_muteruz:password_reset_complete')
+    post_reset_login = False  # require explicit login after reset
+
+
+class UserPasswordResetCompleteView(BasePasswordResetCompleteView):
+    """Step 4 — reset confirmed; displays a direct link to the sign-in page."""
+
+    template_name = 'idan_muteruz/password_reset_complete.html'
 
 
 class AssignRoleView(StaffRequiredMixin, View):

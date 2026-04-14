@@ -1,8 +1,12 @@
 from django.contrib.auth import get_user_model
 from django.contrib.auth.models import Group, Permission
+from django.contrib.auth.tokens import default_token_generator
 from django.contrib.contenttypes.models import ContentType
-from django.test import TestCase
+from django.core import mail
+from django.test import TestCase, override_settings
 from django.urls import reverse
+from django.utils.encoding import force_bytes
+from django.utils.http import urlsafe_base64_encode
 
 from .models import Profile
 
@@ -630,3 +634,275 @@ class IDORTests(RBACTestBase):
         self.assertIn(self.admins_group, self.staff_user.groups.all())
         # Restore
         self.staff_user.groups.clear()
+
+
+# ---------------------------------------------------------------------------
+# Password Reset Tests
+# ---------------------------------------------------------------------------
+
+@override_settings(EMAIL_BACKEND='django.core.mail.backends.locmem.EmailBackend')
+class PasswordResetTests(TestCase):
+    """
+    Tests for the 4-step password reset flow.
+
+    The @override_settings decorator switches to Django's in-memory email
+    backend for every test so that mail.outbox captures sent messages without
+    any SMTP server.
+
+    Security scenarios covered
+    --------------------------
+    Anti-enumeration
+        Submitting a non-existent email returns the same response and the same
+        page as a real one.  An attacker cannot determine which addresses are
+        registered.
+
+    Token security
+        Tokens are HMAC-SHA256-based (Django's PasswordResetTokenGenerator)
+        and are single-use — the moment the password is saved the hash in the
+        token payload no longer matches the stored hash, invalidating the token.
+
+    No auto-login
+        post_reset_login=False forces the user to sign in explicitly after
+        resetting, preventing session takeover via an intercepted email link.
+
+    Password validation
+        Django's AUTH_PASSWORD_VALIDATORS are applied to the new password.
+
+    Email header injection
+        The subject line must contain no newlines.
+    """
+
+    def setUp(self):
+        self.user = User.objects.create_user(
+            username='pr_test_user',
+            email='reset@example.test',
+            password='OldPass!1secure',
+        )
+        self.request_url  = reverse('idan_muteruz:password_reset')
+        self.sent_url     = reverse('idan_muteruz:password_reset_sent')
+        self.complete_url = reverse('idan_muteruz:password_reset_complete')
+
+    # ── Helpers ──────────────────────────────────────────────────────────────
+
+    def _make_confirm_url(self, user=None):
+        """Build a fresh, valid confirm URL for the given user."""
+        u = user or self.user
+        uid   = urlsafe_base64_encode(force_bytes(u.pk))
+        token = default_token_generator.make_token(u)
+        return reverse(
+            'idan_muteruz:password_reset_confirm',
+            kwargs={'uidb64': uid, 'token': token},
+        )
+
+    def _load_set_password_form(self, user=None):
+        """
+        Follow the two-step GET (token-validation redirect) and return the
+        response from the set-password form page.
+        Django stores the validated token in the session and redirects to
+        /<uid>/set-password/ so the token is not exposed in the Referer header.
+        """
+        response = self.client.get(self._make_confirm_url(user), follow=True)
+        return response
+
+    # ── Step 1: Request page ─────────────────────────────────────────────────
+
+    def test_request_page_renders(self):
+        response = self.client.get(self.request_url)
+        self.assertEqual(response.status_code, 200)
+        self.assertTemplateUsed(response, 'idan_muteruz/password_reset_request.html')
+
+    def test_authenticated_user_redirected_away_from_request_page(self):
+        """Authenticated users should use /password/change/, not the reset flow."""
+        self.client.force_login(self.user)
+        response = self.client.get(self.request_url)
+        self.assertRedirects(
+            response,
+            reverse('idan_muteruz:dashboard'),
+            fetch_redirect_response=False,
+        )
+
+    # ── Anti-enumeration ─────────────────────────────────────────────────────
+
+    def test_valid_email_redirects_to_sent_page(self):
+        response = self.client.post(self.request_url, {'email': 'reset@example.test'})
+        self.assertRedirects(response, self.sent_url, fetch_redirect_response=False)
+
+    def test_nonexistent_email_redirects_to_same_sent_page(self):
+        """
+        ANTI-ENUMERATION: a non-registered email must produce exactly the
+        same redirect as a real one.  The attacker learns nothing about which
+        addresses exist.
+        """
+        response = self.client.post(self.request_url, {'email': 'ghost@nowhere.invalid'})
+        self.assertRedirects(response, self.sent_url, fetch_redirect_response=False)
+
+    def test_nonexistent_email_sends_no_email(self):
+        self.client.post(self.request_url, {'email': 'ghost@nowhere.invalid'})
+        self.assertEqual(len(mail.outbox), 0)
+
+    def test_invalid_email_format_is_rejected(self):
+        response = self.client.post(self.request_url, {'email': 'not-an-email'})
+        self.assertEqual(response.status_code, 200)
+        self.assertFormError(response.context['form'], 'email', 'Enter a valid email address.')
+
+    def test_inactive_user_receives_no_email(self):
+        """
+        Django only sends reset mail to active users with a usable password.
+        An inactive account must not receive an email (response is identical
+        to the active-user case — anti-enumeration is preserved).
+        """
+        self.user.is_active = False
+        self.user.save()
+        response = self.client.post(self.request_url, {'email': 'reset@example.test'})
+        self.assertRedirects(response, self.sent_url, fetch_redirect_response=False)
+        self.assertEqual(len(mail.outbox), 0)
+
+    # ── Step 2: Sent page ────────────────────────────────────────────────────
+
+    def test_sent_page_renders(self):
+        response = self.client.get(self.sent_url)
+        self.assertEqual(response.status_code, 200)
+        self.assertTemplateUsed(response, 'idan_muteruz/password_reset_sent.html')
+
+    # ── Email contents ───────────────────────────────────────────────────────
+
+    def test_email_is_sent_for_registered_address(self):
+        self.client.post(self.request_url, {'email': 'reset@example.test'})
+        self.assertEqual(len(mail.outbox), 1)
+
+    def test_email_contains_reset_link(self):
+        self.client.post(self.request_url, {'email': 'reset@example.test'})
+        self.assertIn('/password/reset/', mail.outbox[0].body)
+
+    def test_email_subject_contains_no_newlines(self):
+        """
+        A subject line with embedded newlines enables email header injection.
+        The subject template must produce a single clean line.
+        """
+        self.client.post(self.request_url, {'email': 'reset@example.test'})
+        subject = mail.outbox[0].subject
+        self.assertNotIn('\n', subject)
+        self.assertNotIn('\r', subject)
+
+    def test_email_does_not_contain_username(self):
+        """
+        The email body must not expose the username — only the reset link.
+        Leaking the username confirms account existence and aids phishing.
+        """
+        self.client.post(self.request_url, {'email': 'reset@example.test'})
+        self.assertNotIn(self.user.username, mail.outbox[0].body)
+
+    # ── Step 3: Confirm page ─────────────────────────────────────────────────
+
+    def test_confirm_page_renders_with_valid_token(self):
+        response = self._load_set_password_form()
+        self.assertEqual(response.status_code, 200)
+        self.assertTemplateUsed(response, 'idan_muteruz/password_reset_confirm.html')
+        self.assertTrue(response.context['validlink'])
+
+    def test_confirm_page_with_invalid_token_marks_link_invalid(self):
+        uid = urlsafe_base64_encode(force_bytes(self.user.pk))
+        url = reverse('idan_muteruz:password_reset_confirm',
+                      kwargs={'uidb64': uid, 'token': 'tampered-token-xyz'})
+        response = self.client.get(url, follow=True)
+        self.assertEqual(response.status_code, 200)
+        self.assertFalse(response.context['validlink'])
+
+    def test_confirm_page_with_garbage_uid_marks_link_invalid(self):
+        url = reverse('idan_muteruz:password_reset_confirm',
+                      kwargs={'uidb64': 'notbase64', 'token': 'sometoken'})
+        response = self.client.get(url, follow=True)
+        self.assertEqual(response.status_code, 200)
+        self.assertFalse(response.context['validlink'])
+
+    # ── Step 4: Full happy-path reset ────────────────────────────────────────
+
+    def test_successful_reset_redirects_to_complete(self):
+        form_response = self._load_set_password_form()
+        self.assertTrue(form_response.context['validlink'])
+
+        response = self.client.post(
+            form_response.wsgi_request.path,
+            {'new_password1': 'NewSecure!pass99', 'new_password2': 'NewSecure!pass99'},
+            follow=True,
+        )
+        self.assertRedirects(response, self.complete_url)
+
+    def test_successful_reset_allows_login_with_new_password(self):
+        form_response = self._load_set_password_form()
+        self.client.post(
+            form_response.wsgi_request.path,
+            {'new_password1': 'NewSecure!pass99', 'new_password2': 'NewSecure!pass99'},
+        )
+        self.assertTrue(
+            self.client.login(username='pr_test_user', password='NewSecure!pass99')
+        )
+
+    def test_successful_reset_rejects_old_password(self):
+        form_response = self._load_set_password_form()
+        self.client.post(
+            form_response.wsgi_request.path,
+            {'new_password1': 'NewSecure!pass99', 'new_password2': 'NewSecure!pass99'},
+        )
+        self.assertFalse(
+            self.client.login(username='pr_test_user', password='OldPass!1secure')
+        )
+
+    def test_reset_does_not_auto_login_user(self):
+        """
+        post_reset_login=False: after a successful reset the session must NOT
+        contain an authenticated user.  The user must explicitly sign in.
+        """
+        form_response = self._load_set_password_form()
+        post_response = self.client.post(
+            form_response.wsgi_request.path,
+            {'new_password1': 'NewSecure!pass99', 'new_password2': 'NewSecure!pass99'},
+            follow=True,
+        )
+        self.assertFalse(post_response.wsgi_request.user.is_authenticated)
+
+    # ── Token single-use ─────────────────────────────────────────────────────
+
+    def test_token_is_invalidated_after_successful_reset(self):
+        """
+        After a reset the password hash changes, so the original token no
+        longer validates — reusing the link must show validlink=False.
+        """
+        original_confirm_url = self._make_confirm_url()
+        # Complete the reset
+        form_response = self.client.get(original_confirm_url, follow=True)
+        self.client.post(
+            form_response.wsgi_request.path,
+            {'new_password1': 'NewSecure!pass99', 'new_password2': 'NewSecure!pass99'},
+        )
+        # Attempt to reuse the original URL
+        reuse_response = self.client.get(original_confirm_url, follow=True)
+        self.assertFalse(reuse_response.context['validlink'])
+
+    # ── Password validation ──────────────────────────────────────────────────
+
+    def test_too_short_password_is_rejected(self):
+        form_response = self._load_set_password_form()
+        response = self.client.post(
+            form_response.wsgi_request.path,
+            {'new_password1': 'short', 'new_password2': 'short'},
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertTemplateUsed(response, 'idan_muteruz/password_reset_confirm.html')
+        self.assertTrue(response.context['form'].errors)
+
+    def test_mismatched_passwords_are_rejected(self):
+        form_response = self._load_set_password_form()
+        response = self.client.post(
+            form_response.wsgi_request.path,
+            {'new_password1': 'NewSecure!pass99', 'new_password2': 'DifferentPass!99'},
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.context['form'].errors)
+
+    # ── Step 5: Complete page ────────────────────────────────────────────────
+
+    def test_complete_page_renders(self):
+        response = self.client.get(self.complete_url)
+        self.assertEqual(response.status_code, 200)
+        self.assertTemplateUsed(response, 'idan_muteruz/password_reset_complete.html')
