@@ -445,3 +445,188 @@ class AssignRoleViewTests(RBACTestBase):
         response = self.client.get(reverse('idan_muteruz:admin_panel'))
         self.assertEqual(response.status_code, 200)
         self.assertNotIn('user_rows', response.context)
+
+
+# ---------------------------------------------------------------------------
+# IDOR Tests
+# ---------------------------------------------------------------------------
+
+class IDORTests(RBACTestBase):
+    """
+    Tests verifying that Insecure Direct Object Reference (IDOR) attacks are
+    not possible in any view that handles user-owned resources.
+
+    Audit summary
+    -------------
+    ProfileView              /profile/
+        No identifier in URL.  Always bound to request.user and
+        request.user.profile.  Structurally immune to IDOR.
+
+    UserPasswordChangeView   /password/change/
+        No identifier in URL.  Django's PasswordChangeView always sets
+        form.user = request.user.  Structurally immune to IDOR.
+
+    DashboardView            /dashboard/
+        Read-only.  No identifier.  Not vulnerable.
+
+    AssignRoleView           /admin-panel/users/<pk>/assign-role/
+        IDOR vulnerability fixed: object-level checks now prevent:
+          • targeting a superuser's pk
+          • a staff user modifying another staff user's groups
+          • any actor reassigning their own groups (self-escalation)
+    """
+
+    # ── ProfileView — structurally immune (no pk in URL) ─────────────────────
+
+    def test_profile_view_always_shows_own_data(self):
+        """GET /profile/ returns the authenticated user's own form instances."""
+        self.client.force_login(self.student)
+        response = self.client.get(reverse('idan_muteruz:profile'))
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.context['user_form'].instance, self.student)
+        self.assertEqual(
+            response.context['profile_form'].instance,
+            self.student.profile,
+        )
+
+    def test_profile_post_never_modifies_another_users_data(self):
+        """
+        A POST to /profile/ must only ever update the authenticated user's
+        own record.  The instructor's data must be untouched.
+        """
+        original_email = self.instructor.email
+        original_bio   = self.instructor.profile.bio
+
+        self.client.force_login(self.student)
+        self.client.post(
+            reverse('idan_muteruz:profile'),
+            data={
+                'first_name':   'Hacker',
+                'last_name':    'Attempt',
+                'email':        self.student.email,
+                'display_name': 'pwned',
+                'bio':          'injected',
+            },
+        )
+
+        self.instructor.refresh_from_db()
+        self.instructor.profile.refresh_from_db()
+        self.assertEqual(self.instructor.email,        original_email)
+        self.assertEqual(self.instructor.profile.bio,  original_bio)
+
+    def test_profile_anonymous_redirected_to_login(self):
+        url = reverse('idan_muteruz:profile')
+        response = self.client.get(url)
+        self.assertRedirects(response, f"{reverse('idan_muteruz:login')}?next={url}")
+
+    # ── UserPasswordChangeView — structurally immune (no pk in URL) ──────────
+
+    def test_password_change_form_is_bound_to_authenticated_user(self):
+        """The change-password form must be bound to the logged-in user only."""
+        self.client.force_login(self.student)
+        response = self.client.get(reverse('idan_muteruz:password_change'))
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.context['form'].user, self.student)
+
+    def test_password_change_anonymous_redirected_to_login(self):
+        url = reverse('idan_muteruz:password_change')
+        response = self.client.get(url)
+        self.assertRedirects(response, f"{reverse('idan_muteruz:login')}?next={url}")
+
+    # ── AssignRoleView — object-level authorization on <pk> ──────────────────
+
+    def _post_assign(self, actor, target_pk, group=None):
+        """Helper: POST assign-role as actor, targeting target_pk."""
+        self.client.force_login(actor)
+        group_pk = (group or self.students_group).pk
+        return self.client.post(
+            reverse('idan_muteruz:assign_role', kwargs={'pk': target_pk}),
+            data={f'user_{target_pk}-group': group_pk},
+        )
+
+    def test_cannot_target_superuser_pk(self):
+        """
+        IDOR fix check 1: staff must not be able to modify a superuser's groups
+        by guessing their pk.
+        """
+        # Capture the group set BEFORE the attempt so we can compare after.
+        groups_before = set(self.superuser.groups.values_list('pk', flat=True))
+        response = self._post_assign(self.staff_user, self.superuser.pk)
+        self.assertEqual(response.status_code, 403)
+        # Superuser's groups must be completely unchanged.
+        groups_after = set(self.superuser.groups.values_list('pk', flat=True))
+        self.assertEqual(groups_before, groups_after)
+
+    def test_superuser_cannot_target_another_superuser_pk(self):
+        """Even superusers cannot modify another superuser via this endpoint."""
+        another_super = User.objects.create_superuser(
+            username='super2', password='S3cure!pass', email='super2@idor.test',
+        )
+        response = self._post_assign(self.superuser, another_super.pk)
+        self.assertEqual(response.status_code, 403)
+
+    def test_staff_cannot_target_another_staff_user_pk(self):
+        """
+        IDOR fix check 2: a staff user must not be able to escalate or
+        de-escalate a peer staff member by guessing their pk.
+        """
+        peer_staff = User.objects.create_user(
+            username='peer_staff', password='S3cure!pass',
+            email='peer@idor.test', is_staff=True,
+        )
+        response = self._post_assign(self.staff_user, peer_staff.pk)
+        self.assertEqual(response.status_code, 403)
+
+    def test_staff_cannot_reassign_own_pk(self):
+        """
+        IDOR fix check 3: a staff user must not be able to self-escalate by
+        posting their own pk as the target.
+        """
+        response = self._post_assign(self.staff_user, self.staff_user.pk)
+        self.assertEqual(response.status_code, 403)
+
+    def test_superuser_cannot_reassign_own_pk(self):
+        """Superusers are also blocked from self-assignment (check 1 applies)."""
+        response = self._post_assign(self.superuser, self.superuser.pk)
+        self.assertEqual(response.status_code, 403)
+
+    def test_nonexistent_pk_returns_404_not_403(self):
+        """
+        A fabricated pk that matches no user must return 404, not 403.
+        This avoids leaking whether a higher-privileged user with that pk
+        exists; it simply says 'no such resource'.
+        """
+        self.client.force_login(self.staff_user)
+        response = self.client.post(
+            reverse('idan_muteruz:assign_role', kwargs={'pk': 999999}),
+            data={'user_999999-group': self.students_group.pk},
+        )
+        self.assertEqual(response.status_code, 404)
+
+    def test_staff_can_target_regular_user_pk(self):
+        """Confirm the fix does not break legitimate staff assignment."""
+        response = self._post_assign(
+            self.staff_user, self.student.pk, group=self.instructors_group,
+        )
+        self.assertRedirects(
+            response, reverse('idan_muteruz:admin_panel'),
+            fetch_redirect_response=False,
+        )
+        self.student.refresh_from_db()
+        self.assertIn(self.instructors_group, self.student.groups.all())
+        # Restore
+        self.student.groups.set([self.students_group])
+
+    def test_superuser_can_target_staff_user_pk(self):
+        """Only superusers may change a staff member's group (check 2 allows this)."""
+        response = self._post_assign(
+            self.superuser, self.staff_user.pk, group=self.admins_group,
+        )
+        self.assertRedirects(
+            response, reverse('idan_muteruz:admin_panel'),
+            fetch_redirect_response=False,
+        )
+        self.staff_user.refresh_from_db()
+        self.assertIn(self.admins_group, self.staff_user.groups.all())
+        # Restore
+        self.staff_user.groups.clear()

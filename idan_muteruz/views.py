@@ -4,6 +4,7 @@ from django.contrib.auth.mixins import LoginRequiredMixin
 from django.contrib.auth.models import Group
 from django.contrib.auth.views import LoginView, LogoutView, PasswordChangeView
 from django.contrib.messages.views import SuccessMessageMixin
+from django.core.exceptions import PermissionDenied
 from django.shortcuts import get_object_or_404, redirect
 from django.urls import reverse_lazy
 from django.views.generic import FormView, RedirectView, TemplateView, View
@@ -66,10 +67,15 @@ class ProfileView(LoginRequiredMixin, TemplateView):
     template_name = 'idan_muteruz/profile.html'
     login_url = reverse_lazy('idan_muteruz:login')
 
+    # IDOR note: there is no identifier in the URL.  Every read and write here
+    # is explicitly scoped to request.user / request.user.profile, so it is
+    # structurally impossible for one user to view or modify another user's
+    # profile through this endpoint.
+
     def get_context_data(self, **kwargs):
         context = super().get_context_data(**kwargs)
         context['user_form'] = UserUpdateForm(
-            instance=self.request.user,
+            instance=self.request.user,          # always the logged-in user
             user=self.request.user,
         )
         context['profile_form'] = ProfileForm(instance=self.request.user.profile)
@@ -78,10 +84,13 @@ class ProfileView(LoginRequiredMixin, TemplateView):
     def post(self, request, *args, **kwargs):
         user_form = UserUpdateForm(
             request.POST,
-            instance=request.user,
+            instance=request.user,               # always the logged-in user
             user=request.user,
         )
-        profile_form = ProfileForm(request.POST, instance=request.user.profile)
+        profile_form = ProfileForm(
+            request.POST,
+            instance=request.user.profile,       # always the logged-in user's profile
+        )
 
         if user_form.is_valid() and profile_form.is_valid():
             user_form.save()
@@ -100,6 +109,10 @@ class UserPasswordChangeView(SuccessMessageMixin, LoginRequiredMixin, PasswordCh
     success_url = reverse_lazy('idan_muteruz:profile')
     success_message = 'Your password has been changed successfully.'
     login_url = reverse_lazy('idan_muteruz:login')
+
+    # IDOR note: Django's PasswordChangeView always binds form.user = request.user
+    # (see django/contrib/auth/views.py).  There is no pk or username in the URL,
+    # so this view cannot be used to change another user's password.
 
 
 class AdminPanelView(PrivilegedAccessMixin, TemplateView):
@@ -150,20 +163,48 @@ class AdminPanelView(PrivilegedAccessMixin, TemplateView):
 
 class AssignRoleView(StaffRequiredMixin, View):
     """
-    POST-only endpoint: replaces a target user's group membership with the
-    single group chosen in the form.
+    POST-only endpoint: replaces a target user's group membership with one
+    chosen group.
 
-    Only staff and superusers may call this view.
-    Instructors can view the admin panel but cannot change roles.
+    Route-level guard: StaffRequiredMixin (is_staff or is_superuser).
+
+    Object-level guards (applied after fetching the target user by pk):
+        1. Superusers cannot be targeted — their accounts are managed via
+           Django admin, not this endpoint.  Returns 403.
+        2. Only superusers may modify another staff user's group.  A plain
+           staff member cannot escalate or de-escalate peers.  Returns 403.
+        3. No actor may reassign their own group — prevents self-escalation.
+           Returns 403.
+
+    WHY 403 (not 404) for these checks:
+        The target user is already listed in the admin panel table that the
+        actor can see.  Pretending the user doesn't exist would be confusing
+        rather than protective.  404 is reserved for genuinely missing objects
+        (handled by get_object_or_404 above the checks).
     """
 
     login_url = reverse_lazy('idan_muteruz:login')
     http_method_names = ['post']
 
     def post(self, request, pk):
+        # Non-existent pk → 404 (reveals nothing about other valid pks).
         target_user = get_object_or_404(User, pk=pk)
-        form = AssignRoleForm(request.POST, prefix=f'user_{pk}')
 
+        # ── Object-level authorization ────────────────────────────────────────
+        # Check 1: superuser accounts are off-limits to everyone via this view.
+        if target_user.is_superuser:
+            raise PermissionDenied
+
+        # Check 2: modifying a staff member's groups requires superuser status.
+        if target_user.is_staff and not request.user.is_superuser:
+            raise PermissionDenied
+
+        # Check 3: no one may reassign their own role (self-escalation guard).
+        if target_user == request.user:
+            raise PermissionDenied
+        # ─────────────────────────────────────────────────────────────────────
+
+        form = AssignRoleForm(request.POST, prefix=f'user_{pk}')
         if form.is_valid():
             group = form.cleaned_data['group']
             target_user.groups.set([group])
