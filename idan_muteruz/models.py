@@ -17,6 +17,9 @@ class Profile(models.Model):
     class Meta:
         verbose_name = _('profile')
         verbose_name_plural = _('profiles')
+        permissions = [
+            ('can_access_admin_panel', 'Can access the admin panel'),
+        ]
 
     def __str__(self) -> str:
         return self.display_name or self.user.get_full_name() or self.user.username

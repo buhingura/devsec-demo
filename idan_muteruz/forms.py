@@ -60,3 +60,22 @@ class ProfileForm(forms.ModelForm):
 
 class CustomPasswordChangeForm(PasswordChangeForm):
     pass
+
+
+class AssignRoleForm(forms.Form):
+    """
+    Single-field form that replaces all of a user's groups with one chosen group.
+    Rendered once per user row inside the admin panel's User Management table.
+    """
+
+    group = forms.ModelChoiceField(
+        queryset=None,  # set in __init__
+        empty_label=None,
+        label='Role',
+        widget=forms.Select(attrs={'class': 'role-select'}),
+    )
+
+    def __init__(self, *args, **kwargs):
+        from django.contrib.auth.models import Group
+        super().__init__(*args, **kwargs)
+        self.fields['group'].queryset = Group.objects.order_by('name')

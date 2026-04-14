@@ -12,4 +12,8 @@ urlpatterns = [
     path('dashboard/', views.DashboardView.as_view(), name='dashboard'),
     path('profile/', views.ProfileView.as_view(), name='profile'),
     path('password/change/', views.UserPasswordChangeView.as_view(), name='password_change'),
+    # Privileged route — staff / instructors / admins only
+    path('admin-panel/', views.AdminPanelView.as_view(), name='admin_panel'),
+    # Role assignment — staff / superusers only (POST)
+    path('admin-panel/users/<int:pk>/assign-role/', views.AssignRoleView.as_view(), name='assign_role'),
 ]

@@ -53,7 +53,10 @@
         </div>
         <div class="stat-label">Role</div>
         <div class="stat-value" style="font-size:.95rem;">
-            {% if user.is_superuser %}Admin{% elif user.is_staff %}Staff{% else %}Member{% endif %}
+            {% if user.is_superuser %}Superuser
+            {% elif user.is_staff %}Staff
+            {% elif perms.idan_muteruz.can_access_admin_panel %}Instructor
+            {% else %}Student{% endif %}
         </div>
         <div class="stat-sub">Access level</div>
     </div>
@@ -130,12 +133,32 @@
                     <span class="info-label">Account status</span>
                     <span class="badge badge-green">Active</span>
                 </div>
-                <div class="info-row" style="border:none;">
+                <div class="info-row">
                     <span class="info-label">Permissions</span>
                     <span class="badge badge-indigo">
-                        {% if user.is_superuser %}Superuser{% elif user.is_staff %}Staff{% else %}Standard{% endif %}
+                        {% if user.is_superuser %}Superuser
+                        {% elif user.is_staff %}Staff
+                        {% elif perms.idan_muteruz.can_access_admin_panel %}Privileged
+                        {% else %}Standard{% endif %}
                     </span>
                 </div>
+                <div class="info-row" style="border:none;">
+                    <span class="info-label">Groups</span>
+                    <span class="info-value" style="font-size:.8rem; text-align:right;">
+                        {% for g in user.groups.all %}
+                            <span class="badge badge-indigo" style="margin-left:.2rem;">{{ g.name }}</span>
+                        {% empty %}
+                            <span style="color:var(--muted);">none</span>
+                        {% endfor %}
+                    </span>
+                </div>
+                {% if user.is_staff or user.is_superuser or perms.idan_muteruz.can_access_admin_panel %}
+                <div style="margin-top:.75rem; padding-top:.75rem; border-top:1px solid var(--border);">
+                    <a href="{% url 'idan_muteruz:admin_panel' %}" class="btn btn-primary btn-sm btn-full">
+                        Go to Admin Panel
+                    </a>
+                </div>
+                {% endif %}
             </div>
         </div>
     </div>
