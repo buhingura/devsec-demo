@@ -1081,7 +1081,7 @@ class OpenRedirectTests(TestCase):
     Prove that every redirect target accepted by an auth-flow view is
     validated with ``url_has_allowed_host_and_scheme`` before use.
 
-    Audit summary (branch: assignment/fix-open-redirect)
+    Audit summary (branch: assignment/fix-open-redirects)
     -----------------------------------------------------
     Issue 1 — Template gap (login.html, register.html):
         Neither template included ``<input type="hidden" name="next" …>``.
@@ -1342,3 +1342,50 @@ class OpenRedirectTests(TestCase):
         )
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.context.get('next', ''), '')
+
+    # ── lockout redirect — next is preserved or rejected ─────────────────────
+
+    @override_settings(LOGIN_MAX_ATTEMPTS=3, LOGIN_LOCKOUT_SECONDS=60)
+    def test_lockout_redirect_preserves_valid_next(self):
+        """
+        When an account is locked out, the redirect back to login must carry a
+        validated internal ``next`` URL so the user does not lose their
+        destination after the lockout window expires.
+        """
+        login_url_with_next = f'{self.login_url}?next={self.profile_url}'
+        # Trigger lockout
+        for _ in range(3):
+            self.client.post(
+                login_url_with_next,
+                {'username': self.user.username, 'password': 'wrong'},
+            )
+        # Fourth attempt (locked) — should redirect back to login?next=/profile/
+        response = self.client.post(
+            login_url_with_next,
+            {'username': self.user.username, 'password': self.password},
+        )
+        expected = f'{self.login_url}?next={self.profile_url}'
+        self.assertRedirects(response, expected, fetch_redirect_response=False)
+
+    @override_settings(LOGIN_MAX_ATTEMPTS=3, LOGIN_LOCKOUT_SECONDS=60)
+    def test_lockout_redirect_drops_external_next(self):
+        """
+        When an account is locked out, an external ``next`` URL must be
+        silently dropped — the lockout redirect must not become an open
+        redirect vector.
+        """
+        evil_next = 'http://evil.com/'
+        login_url_evil = f'{self.login_url}?next={evil_next}'
+        for _ in range(3):
+            self.client.post(
+                login_url_evil,
+                {'username': self.user.username, 'password': 'wrong'},
+            )
+        response = self.client.post(
+            login_url_evil,
+            {'username': self.user.username, 'password': self.password},
+        )
+        # Must redirect to plain login, not to evil.com
+        self.assertRedirects(
+            response, self.login_url, fetch_redirect_response=False
+        )

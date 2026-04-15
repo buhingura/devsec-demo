@@ -126,6 +126,18 @@ LOGIN_REDIRECT_URL = '/dashboard/'
 LOGOUT_REDIRECT_URL = '/login/'
 LOGIN_URL = '/login/'
 
+# ── Email ────────────────────────────────────────────────────────────────────
+# Console backend is safe for development; override via env var in production.
+EMAIL_BACKEND = os.environ.get(
+    'EMAIL_BACKEND',
+    'django.core.mail.backends.console.EmailBackend',
+)
+DEFAULT_FROM_EMAIL = os.environ.get('DEFAULT_FROM_EMAIL', 'noreply@localhost')
+
+# ── Password reset ────────────────────────────────────────────────────────────
+# Token validity window in seconds.  Default: 1 hour.
+PASSWORD_RESET_TIMEOUT = int(os.environ.get('PASSWORD_RESET_TIMEOUT', '3600'))
+
 # ── Brute-force / login-throttling ──────────────────────────────────────────
 # Number of consecutive failures before a temporary lockout is enforced.
 LOGIN_MAX_ATTEMPTS = int(os.environ.get('LOGIN_MAX_ATTEMPTS', '5'))

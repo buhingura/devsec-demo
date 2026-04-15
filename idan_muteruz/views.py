@@ -6,7 +6,15 @@ from django.contrib import messages
 from django.contrib.auth import get_user_model, login
 from django.contrib.auth.mixins import LoginRequiredMixin
 from django.contrib.auth.models import Group
-from django.contrib.auth.views import LoginView, LogoutView, PasswordChangeView
+from django.contrib.auth.views import (
+    LoginView,
+    LogoutView,
+    PasswordChangeView,
+    PasswordResetView,
+    PasswordResetDoneView,
+    PasswordResetConfirmView,
+    PasswordResetCompleteView,
+)
 from django.contrib.messages.views import SuccessMessageMixin
 from django.core.exceptions import PermissionDenied
 from django.shortcuts import get_object_or_404, redirect
@@ -429,3 +437,56 @@ class AssignRoleView(StaffRequiredMixin, View):
             messages.error(request, "Invalid role selection. Please try again.")
 
         return redirect('idan_muteruz:admin_panel')
+
+
+# ---------------------------------------------------------------------------
+# Password reset flow (4-step Django built-in flow, hardened)
+# ---------------------------------------------------------------------------
+
+class UserPasswordResetView(PasswordResetView):
+    """
+    Step 1 — user submits their e-mail address.
+
+    Security notes:
+    · Uses a dedicated subject and body template so we control the exact
+      content of the reset e-mail (no subject-line injection via newlines
+      in the template, since Django strips newlines from the subject, but
+      using a .txt template makes the intent explicit).
+    · ``from_email`` is set from DEFAULT_FROM_EMAIL so it can be
+      overridden per-environment without touching code.
+    · The view does NOT reveal whether an e-mail address is registered:
+      Django's PasswordResetView always redirects to the "sent" page
+      regardless of whether the address was found, preventing user
+      enumeration through this endpoint.
+    """
+
+    template_name = 'idan_muteruz/password_reset_request.html'
+    email_template_name = 'idan_muteruz/email/password_reset_body.txt'
+    subject_template_name = 'idan_muteruz/email/password_reset_subject.txt'
+    success_url = reverse_lazy('idan_muteruz:password_reset_sent')
+
+
+class UserPasswordResetSentView(PasswordResetDoneView):
+    """Step 2 — confirmation page shown after the e-mail is dispatched."""
+
+    template_name = 'idan_muteruz/password_reset_sent.html'
+
+
+class UserPasswordResetConfirmView(PasswordResetConfirmView):
+    """
+    Step 3 — user follows the link from the e-mail and sets a new password.
+
+    The ``uidb64``/``token`` pair is validated by the parent class.  An
+    expired or already-used token renders the template with
+    ``validlink=False`` so the user receives a clear error rather than a
+    silent failure.
+    """
+
+    template_name = 'idan_muteruz/password_reset_confirm.html'
+    success_url = reverse_lazy('idan_muteruz:password_reset_complete')
+
+
+class UserPasswordResetCompleteView(PasswordResetCompleteView):
+    """Step 4 — success page shown after the password has been changed."""
+
+    template_name = 'idan_muteruz/password_reset_complete.html'
