@@ -1,8 +1,44 @@
 from django import forms
 from django.contrib.auth import get_user_model
 from django.contrib.auth.forms import PasswordChangeForm, UserCreationForm
+from django.utils.html import strip_tags
 
 from .models import Profile
+
+
+def validate_no_html(value: str) -> None:
+    """
+    Reject input that contains HTML markup.
+
+    Uses Django's ``strip_tags`` to detect any HTML tags in the value.
+    If stripping tags changes the string, HTML was present and the value
+    is rejected.
+
+    Why form-level, not just template auto-escaping:
+    · Template auto-escaping is the primary defence, but defence-in-depth
+      means not relying on a single control.  A future template change that
+      inadvertently adds ``|safe``, ``|linebreaks``, or ``{% autoescape off %}``
+      would activate any stored payload.  Rejecting HTML at write time ensures
+      the database never contains executable markup.
+    · Clear user feedback: the submitter sees an explicit error rather than
+      silently discovering their content looks wrong when rendered.
+
+    Note on ``strip_tags`` behaviour:
+    · Strips complete tags: ``<script>alert(1)</script>`` → ``alert(1)``
+    · Strips partial tags: ``<b`` → ``""``
+    · Does NOT strip HTML entities (``&lt;``, ``&amp;``).  Entities are
+      harmless in plain-text fields because the template will double-encode
+      them on output.
+
+    The minor trade-off is that patterns such as ``<3`` (a common emoticon)
+    are also rejected because the HTML parser treats ``<`` followed by a
+    digit as a malformed tag.  This is an acceptable limitation for fields
+    where no markup is ever intended.
+    """
+    if strip_tags(value) != value:
+        raise forms.ValidationError(
+            'HTML tags are not permitted. Please use plain text only.'
+        )
 
 
 User = get_user_model()
@@ -10,8 +46,14 @@ User = get_user_model()
 
 class RegistrationForm(UserCreationForm):
     email = forms.EmailField(required=True, help_text='Required. Enter a valid email address.')
-    first_name = forms.CharField(required=False, max_length=30, help_text='Optional.')
-    last_name = forms.CharField(required=False, max_length=30, help_text='Optional.')
+    first_name = forms.CharField(
+        required=False, max_length=30, help_text='Optional.',
+        validators=[validate_no_html],
+    )
+    last_name = forms.CharField(
+        required=False, max_length=30, help_text='Optional.',
+        validators=[validate_no_html],
+    )
 
     class Meta:
         model = User
@@ -33,6 +75,14 @@ class RegistrationForm(UserCreationForm):
 
 class UserUpdateForm(forms.ModelForm):
     email = forms.EmailField(required=True)
+    first_name = forms.CharField(
+        required=False, max_length=150,
+        validators=[validate_no_html],
+    )
+    last_name = forms.CharField(
+        required=False, max_length=150,
+        validators=[validate_no_html],
+    )
 
     class Meta:
         model = User
@@ -56,6 +106,15 @@ class ProfileForm(forms.ModelForm):
         widgets = {
             'bio': forms.Textarea(attrs={'rows': 4}),
         }
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        # Apply the no-HTML validator to both user-controlled text fields.
+        # display_name and bio are rendered in dashboard.html and
+        # admin_panel.html; rejecting markup here ensures the database never
+        # stores executable content regardless of future template changes.
+        self.fields['display_name'].validators.append(validate_no_html)
+        self.fields['bio'].validators.append(validate_no_html)
 
 
 class CustomPasswordChangeForm(PasswordChangeForm):

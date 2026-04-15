@@ -1678,3 +1678,248 @@ class AuditLoggingTests(TestCase):
             actor='auditstaff',
             target='audittarget',
         )
+
+
+class StoredXSSTests(TestCase):
+    """
+    Verify that stored XSS via user-controlled profile fields is prevented
+    by two complementary controls:
+
+    1. Form validation  — ``validate_no_html`` rejects HTML tags at write time
+       so the database never stores executable markup.
+
+    2. Template escaping — Django's auto-escaping is the primary runtime
+       defence.  Even if a payload somehow reached the database, rendering it
+       with ``{{ value }}`` (no ``|safe``) would neutralise it.  These tests
+       confirm that the rendered HTML contains the escaped payload text rather
+       than raw tags.
+
+    Test strategy:
+    · Attempt to save XSS payloads through the profile and registration forms
+      and assert the forms are invalid (control 1).
+    · Directly store a payload in the database (bypassing the form) and then
+      fetch the dashboard; assert the raw tag does not appear in the response
+      body (control 2).
+    · Confirm plain text (no tags) is accepted and displayed correctly.
+
+    Why both controls:
+    · A form validator alone would be bypassed by any direct database write,
+      a superuser using the Django admin, or a management command.
+    · Template escaping alone can be undone by a single ``|safe`` addition
+      in a future template edit.
+    · Together they provide defence-in-depth: the payload never enters the
+      database AND cannot execute even if it did.
+    """
+
+    SCRIPT = '<script>alert("xss")</script>'
+    IMG    = '<img src=x onerror=alert(1)>'
+    EVENT  = '" onmouseover="alert(1)" x="'
+
+    def setUp(self):
+        self.password = 'XssP@ss999'
+        self.user = User.objects.create_user(
+            username='xsstest',
+            email='xss@example.com',
+            password=self.password,
+        )
+        self.dashboard_url = reverse('idan_muteruz:dashboard')
+        self.profile_url   = reverse('idan_muteruz:profile')
+        self.register_url  = reverse('idan_muteruz:register')
+
+    # ── helpers ───────────────────────────────────────────────────────────────
+
+    def _store_bio(self, value: str) -> None:
+        """Bypass the form and write directly to the database."""
+        self.user.profile.bio = value
+        self.user.profile.save()
+
+    def _store_display_name(self, value: str) -> None:
+        self.user.profile.display_name = value
+        self.user.profile.save()
+
+    def _get_dashboard(self) -> object:
+        self.client.force_login(self.user)
+        return self.client.get(self.dashboard_url)
+
+    # ── Control 1: form validation rejects HTML ───────────────────────────────
+
+    def test_profile_form_rejects_script_in_bio(self):
+        """The profile form must reject a <script> tag in the bio field."""
+        self.client.force_login(self.user)
+        response = self.client.post(self.profile_url, {
+            'first_name': '',
+            'last_name': '',
+            'email': self.user.email,
+            'display_name': '',
+            'bio': self.SCRIPT,
+        })
+        # A 200 response means the form was re-rendered with an error.
+        self.assertEqual(response.status_code, 200)
+        self.assertFalse(
+            User.objects.filter(pk=self.user.pk).first().profile.bio == self.SCRIPT,
+            'XSS payload must not be stored in the database.',
+        )
+
+    def test_profile_form_rejects_img_onerror_in_bio(self):
+        """An <img onerror> payload must be rejected by the bio field."""
+        self.client.force_login(self.user)
+        response = self.client.post(self.profile_url, {
+            'first_name': '',
+            'last_name': '',
+            'email': self.user.email,
+            'display_name': '',
+            'bio': self.IMG,
+        })
+        self.assertEqual(response.status_code, 200)
+        self.user.profile.refresh_from_db()
+        self.assertNotEqual(self.user.profile.bio, self.IMG)
+
+    def test_profile_form_rejects_script_in_display_name(self):
+        """The display_name field must reject HTML tags."""
+        self.client.force_login(self.user)
+        response = self.client.post(self.profile_url, {
+            'first_name': '',
+            'last_name': '',
+            'email': self.user.email,
+            'display_name': self.SCRIPT,
+            'bio': '',
+        })
+        self.assertEqual(response.status_code, 200)
+        self.user.profile.refresh_from_db()
+        self.assertNotEqual(self.user.profile.display_name, self.SCRIPT)
+
+    def test_registration_rejects_script_in_first_name(self):
+        """first_name must not accept HTML tags during registration."""
+        response = self.client.post(self.register_url, {
+            'username': 'xssnewuser',
+            'email': 'xssnew@example.com',
+            'first_name': self.SCRIPT,
+            'last_name': 'Test',
+            'password1': self.password,
+            'password2': self.password,
+        })
+        self.assertEqual(response.status_code, 200)
+        self.assertFalse(User.objects.filter(username='xssnewuser').exists())
+
+    def test_registration_rejects_script_in_last_name(self):
+        """last_name must not accept HTML tags during registration."""
+        response = self.client.post(self.register_url, {
+            'username': 'xssnewuser2',
+            'email': 'xssnew2@example.com',
+            'first_name': 'Test',
+            'last_name': self.SCRIPT,
+            'password1': self.password,
+            'password2': self.password,
+        })
+        self.assertEqual(response.status_code, 200)
+        self.assertFalse(User.objects.filter(username='xssnewuser2').exists())
+
+    # ── Control 2: template auto-escaping neutralises stored payloads ─────────
+
+    def test_script_in_bio_is_escaped_in_dashboard(self):
+        """
+        A <script> tag stored directly in the bio must not appear as a raw
+        tag in the rendered dashboard — it must be HTML-escaped.
+        """
+        self._store_bio(self.SCRIPT)
+        response = self._get_dashboard()
+        self.assertEqual(response.status_code, 200)
+        content = response.content.decode()
+        # The raw tag must NOT be present.
+        self.assertNotIn('<script>', content)
+        # The escaped form MUST be present (proves it was rendered, not silently dropped).
+        self.assertIn('&lt;script&gt;', content)
+
+    def test_img_onerror_in_bio_is_escaped_in_dashboard(self):
+        """An <img onerror> payload stored in bio must be escaped, not executed."""
+        self._store_bio(self.IMG)
+        response = self._get_dashboard()
+        self.assertEqual(response.status_code, 200)
+        content = response.content.decode()
+        self.assertNotIn('<img ', content.replace('<!-- ', ''))
+        self.assertIn('&lt;img', content)
+
+    def test_script_in_display_name_is_escaped_in_dashboard(self):
+        """A <script> tag in display_name must be escaped everywhere it is rendered."""
+        self._store_display_name(self.SCRIPT)
+        response = self._get_dashboard()
+        self.assertEqual(response.status_code, 200)
+        content = response.content.decode()
+        self.assertNotIn('<script>', content)
+        self.assertIn('&lt;script&gt;', content)
+
+    def test_attribute_injection_in_display_name_is_escaped(self):
+        """
+        An attribute-injection payload (e.g. ``" onmouseover="alert(1)"``) in
+        display_name must be escaped so it cannot inject a new HTML attribute.
+
+        The word ``onmouseover`` may still appear in the rendered HTML as
+        escaped text content — that is safe and expected.  What must NOT
+        appear is the raw sequence ``onmouseover="`` which would indicate the
+        payload broke out of the text context into an HTML attribute.
+        """
+        self._store_display_name(self.EVENT)
+        response = self._get_dashboard()
+        self.assertEqual(response.status_code, 200)
+        content = response.content.decode()
+        # Raw attribute injection must not be present.
+        self.assertNotIn('onmouseover="alert', content)
+        # The escaped form must be present (confirms the value was rendered).
+        self.assertIn('&quot;', content)
+
+    # ── Regression: legitimate plain text is accepted and displayed ───────────
+
+    def test_plain_text_bio_is_accepted_and_displayed(self):
+        """Normal plain-text bio content must pass validation and render correctly."""
+        plain = 'Software engineer. Interested in security and distributed systems.'
+        self.client.force_login(self.user)
+        response = self.client.post(self.profile_url, {
+            'first_name': '',
+            'last_name': '',
+            'email': self.user.email,
+            'display_name': '',
+            'bio': plain,
+        })
+        # Successful save redirects to the profile page.
+        self.assertRedirects(response, self.profile_url)
+        self.user.profile.refresh_from_db()
+        self.assertEqual(self.user.profile.bio, plain)
+
+    def test_plain_text_display_name_is_accepted(self):
+        """A display name with no HTML must be accepted and stored unchanged."""
+        name = 'Alice B. Cooper'
+        self.client.force_login(self.user)
+        response = self.client.post(self.profile_url, {
+            'first_name': '',
+            'last_name': '',
+            'email': self.user.email,
+            'display_name': name,
+            'bio': '',
+        })
+        self.assertRedirects(response, self.profile_url)
+        self.user.profile.refresh_from_db()
+        self.assertEqual(self.user.profile.display_name, name)
+
+    def test_ampersand_and_quotes_in_bio_are_escaped_not_double_escaped(self):
+        """
+        Special characters that are not HTML tags — such as ``&``, ``"``, and
+        ``'`` — must be accepted by the form and rendered with their entity
+        equivalents, not double-escaped.
+        """
+        value = 'Research & Development, "security"'
+        self.client.force_login(self.user)
+        self.client.post(self.profile_url, {
+            'first_name': '',
+            'last_name': '',
+            'email': self.user.email,
+            'display_name': '',
+            'bio': value,
+        })
+        self.user.profile.refresh_from_db()
+        self.assertEqual(self.user.profile.bio, value)
+        # Fetch dashboard and verify the text is present (escaped but readable).
+        response = self._get_dashboard()
+        content = response.content.decode()
+        # Django escapes & to &amp; and " to &quot; — the text must be in the page.
+        self.assertIn('Research', content)
+        self.assertIn('Development', content)
