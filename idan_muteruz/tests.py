@@ -3,7 +3,7 @@ from datetime import timedelta
 from django.contrib.auth import get_user_model
 from django.contrib.auth.models import Group, Permission
 from django.contrib.contenttypes.models import ContentType
-from django.test import TestCase, override_settings
+from django.test import Client, TestCase, override_settings
 from django.urls import reverse
 from django.utils import timezone
 
@@ -886,3 +886,187 @@ class BruteForceProtectionTests(TestCase):
             self.url,
             fetch_redirect_response=False,
         )
+
+
+# =============================================================================
+# CSRF protection tests
+# =============================================================================
+
+class CsrfProtectionTests(TestCase):
+    """
+    Verify that every state-changing endpoint enforces CSRF token validation
+    and that the logout view rejects unsafe HTTP methods.
+
+    All tests that check token rejection use ``Client(enforce_csrf_checks=True)``
+    so Django's CSRF middleware actually validates tokens, exactly as it does
+    in production.  The default test client disables CSRF checking; these tests
+    explicitly opt back in.
+
+    Audit summary (branch: assignment/fix-csrf-protection)
+    -------------------------------------------------------
+    Clean (no changes required):
+    * All six POST forms include ``{% csrf_token %}``.
+    * ``CsrfViewMiddleware`` is listed in MIDDLEWARE.
+    * No ``@csrf_exempt`` decorator is used anywhere.
+    * No AJAX requests exist in the codebase.
+
+    Fixed:
+    * ``UserLogoutView.http_method_names`` previously included ``'get'``,
+      ``'head'``, and ``'trace'``.  While Django 5.2 has no ``get()``
+      handler on LogoutView (so GET returned 405 in practice), the
+      explicit inclusion was misleading, violated the principle that only
+      POST may trigger a session-ending state change, and enabling TRACE
+      creates a Cross-Site Tracing (XST) attack surface.
+      Fixed: restricted to ``['post', 'options']``.
+    """
+
+    def setUp(self):
+        self.csrf_client = Client(enforce_csrf_checks=True)
+        self.password = 'StrongP@ss123'
+        self.user = User.objects.create_user(
+            username='csrftest',
+            email='csrf@example.com',
+            password=self.password,
+        )
+        self.staff = User.objects.create_user(
+            username='staffcsrf',
+            email='staff@example.com',
+            password=self.password,
+            is_staff=True,
+        )
+        self.target = User.objects.create_user(
+            username='targetcsrf',
+            email='target@example.com',
+            password=self.password,
+        )
+
+    # ── helpers ───────────────────────────────────────────────────────────────
+
+    def _login_csrf_client(self, user):
+        """Log in via force_login and copy the session cookie to the
+        CSRF-enforcing client so it can make authenticated requests."""
+        self.client.force_login(user)
+        session_cookie = self.client.cookies.get('sessionid')
+        if session_cookie:
+            self.csrf_client.cookies['sessionid'] = session_cookie.value
+
+    # ── login endpoint ────────────────────────────────────────────────────────
+
+    def test_login_post_without_csrf_token_returns_403(self):
+        """POST to the login form without a CSRF token must be rejected."""
+        response = self.csrf_client.post(
+            reverse('idan_muteruz:login'),
+            {'username': self.user.username, 'password': self.password},
+        )
+        self.assertEqual(response.status_code, 403)
+
+    # ── register endpoint ─────────────────────────────────────────────────────
+
+    def test_register_post_without_csrf_token_returns_403(self):
+        """POST to the registration form without a CSRF token must be rejected."""
+        response = self.csrf_client.post(
+            reverse('idan_muteruz:register'),
+            {
+                'username': 'newcsrfuser',
+                'email': 'new@example.com',
+                'password1': self.password,
+                'password2': self.password,
+            },
+        )
+        self.assertEqual(response.status_code, 403)
+
+    # ── profile endpoint ──────────────────────────────────────────────────────
+
+    def test_profile_post_without_csrf_token_returns_403(self):
+        """POST to the profile update form without a CSRF token must be rejected."""
+        self._login_csrf_client(self.user)
+        response = self.csrf_client.post(
+            reverse('idan_muteruz:profile'),
+            {'display_name': 'Attacker', 'bio': ''},
+        )
+        self.assertEqual(response.status_code, 403)
+
+    # ── password change endpoint ──────────────────────────────────────────────
+
+    def test_password_change_post_without_csrf_token_returns_403(self):
+        """POST to the password-change form without a CSRF token must be rejected."""
+        self._login_csrf_client(self.user)
+        response = self.csrf_client.post(
+            reverse('idan_muteruz:password_change'),
+            {
+                'old_password': self.password,
+                'new_password1': 'NewP@ss99999',
+                'new_password2': 'NewP@ss99999',
+            },
+        )
+        self.assertEqual(response.status_code, 403)
+
+    # ── logout endpoint ───────────────────────────────────────────────────────
+
+    def test_logout_post_without_csrf_token_returns_403(self):
+        """POST to the logout endpoint without a CSRF token must be rejected."""
+        self._login_csrf_client(self.user)
+        response = self.csrf_client.post(reverse('idan_muteruz:logout'))
+        self.assertEqual(response.status_code, 403)
+
+    def test_logout_get_returns_405(self):
+        """
+        GET requests to the logout URL must be rejected with 405.
+
+        GET-based logout is a classic CSRF-via-safe-method vector: a malicious
+        page embeds ``<img src='/logout/'>`` and the victim's browser silently
+        fetches it.  Restricting to POST means a CSRF token is always required.
+
+        This is the primary fix in this assignment: UserLogoutView previously
+        listed 'get' in http_method_names.
+        """
+        self.client.force_login(self.user)
+        response = self.client.get(reverse('idan_muteruz:logout'))
+        self.assertEqual(response.status_code, 405)
+
+    def test_logout_trace_returns_405(self):
+        """
+        TRACE requests to the logout URL must be rejected with 405.
+
+        HTTP TRACE echoes request headers (including cookies) back to the
+        caller.  In certain proxy configurations this enables Cross-Site
+        Tracing (XST).  TRACE must never be permitted on an endpoint that
+        manages authentication state.
+        """
+        self.client.force_login(self.user)
+        response = self.client.generic('TRACE', reverse('idan_muteruz:logout'))
+        self.assertEqual(response.status_code, 405)
+
+    def test_logout_head_returns_405(self):
+        """
+        HEAD requests to the logout URL must return 405.
+
+        HEAD is semantically read-only and must not trigger session destruction.
+        """
+        self.client.force_login(self.user)
+        response = self.client.head(reverse('idan_muteruz:logout'))
+        self.assertEqual(response.status_code, 405)
+
+    # ── assign-role endpoint ──────────────────────────────────────────────────
+
+    def test_assign_role_post_without_csrf_token_returns_403(self):
+        """POST to the assign-role endpoint without a CSRF token must be rejected."""
+        self._login_csrf_client(self.staff)
+        students_group, _ = Group.objects.get_or_create(name='students')
+        response = self.csrf_client.post(
+            reverse('idan_muteruz:assign_role', kwargs={'pk': self.target.pk}),
+            {f'user_{self.target.pk}-group': students_group.pk},
+        )
+        self.assertEqual(response.status_code, 403)
+
+    # ── safe GET endpoints are unaffected by CSRF enforcement ─────────────────
+
+    def test_login_get_is_accessible_without_token(self):
+        """Safe GET requests must work normally; CSRF only covers state changes."""
+        response = self.csrf_client.get(reverse('idan_muteruz:login'))
+        self.assertEqual(response.status_code, 200)
+
+    def test_register_get_is_accessible_without_token(self):
+        """GET to the registration page must work normally."""
+        response = self.csrf_client.get(reverse('idan_muteruz:register'))
+        self.assertEqual(response.status_code, 200)

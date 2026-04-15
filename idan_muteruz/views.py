@@ -178,7 +178,17 @@ class UserLoginView(LoginView):
 
 class UserLogoutView(LogoutView):
     next_page = reverse_lazy('idan_muteruz:login')
-    http_method_names = ['get', 'post', 'head', 'options', 'trace']
+    # Explicitly restrict to POST only.
+    #
+    # Django 5.0 removed GET-based logout (deprecated in 4.1).  The parent
+    # class already sets http_method_names = ["post", "options"].  We
+    # re-state the restriction here to make the intent unambiguous:
+    # · GET/HEAD are excluded — a bare hyperlink or <img> tag must not be
+    #   able to trigger a logout (classic CSRF via safe methods).
+    # · TRACE is excluded — HTTP TRACE echoes request headers, including
+    #   cookies, back to the caller; enabling it is a Cross-Site Tracing
+    #   (XST) anti-pattern even though modern browsers block TRACE via XHR.
+    http_method_names = ['post', 'options']
 
 
 class DashboardView(LoginRequiredMixin, TemplateView):
