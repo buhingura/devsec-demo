@@ -1,3 +1,6 @@
+from datetime import timedelta
+
+from django.conf import settings
 from django.contrib import messages
 from django.contrib.auth import get_user_model, login
 from django.contrib.auth.mixins import LoginRequiredMixin
@@ -7,6 +10,7 @@ from django.contrib.messages.views import SuccessMessageMixin
 from django.core.exceptions import PermissionDenied
 from django.shortcuts import get_object_or_404, redirect
 from django.urls import reverse_lazy
+from django.utils import timezone
 from django.views.generic import FormView, RedirectView, TemplateView, View
 
 from .forms import (
@@ -17,8 +21,54 @@ from .forms import (
     UserUpdateForm,
 )
 from .mixins import PrivilegedAccessMixin, StaffRequiredMixin
+from .models import LoginAttempt
 
 User = get_user_model()
+
+# ---------------------------------------------------------------------------
+# Brute-force protection helpers
+# ---------------------------------------------------------------------------
+
+def _lockout_window() -> timedelta:
+    return timedelta(seconds=getattr(settings, 'LOGIN_LOCKOUT_SECONDS', 900))
+
+
+def _max_attempts() -> int:
+    return getattr(settings, 'LOGIN_MAX_ATTEMPTS', 5)
+
+
+def _recent_failures(username: str) -> int:
+    """Count failed login attempts for *username* within the lockout window."""
+    since = timezone.now() - _lockout_window()
+    return LoginAttempt.objects.filter(
+        username__iexact=username,
+        succeeded=False,
+        timestamp__gte=since,
+    ).count()
+
+
+def _lockout_expires_at(username: str):
+    """Return the datetime when the lockout expires, or None."""
+    since = timezone.now() - _lockout_window()
+    oldest = (
+        LoginAttempt.objects
+        .filter(username__iexact=username, succeeded=False, timestamp__gte=since)
+        .order_by('timestamp')
+        .first()
+    )
+    return (oldest.timestamp + _lockout_window()) if oldest else None
+
+
+def _get_client_ip(request) -> str | None:
+    """
+    Return the client's IP address from the request.
+
+    REMOTE_ADDR is the direct-connection IP — reliable when Django sits
+    behind a trusted reverse proxy that sets X-Forwarded-For.  In this
+    app there is no proxy configuration, so REMOTE_ADDR is used directly.
+    Recorded for audit purposes only; lockout is not IP-scoped.
+    """
+    return request.META.get('REMOTE_ADDR')
 
 
 class HomeRedirectView(RedirectView):
@@ -48,9 +98,82 @@ class RegisterView(FormView):
 
 
 class UserLoginView(LoginView):
+    """
+    Hardened login view with brute-force protection.
+
+    Protection mechanism — account-based sliding-window lockout:
+
+    · After LOGIN_MAX_ATTEMPTS (default 5) consecutive failures within
+      LOGIN_LOCKOUT_SECONDS (default 900 s / 15 min), the account is
+      temporarily locked for the remainder of that window.
+    · The lockout window slides: it is anchored to the *oldest* failure in
+      the current window, not to the first-ever failure.  Once that oldest
+      failure falls outside the window the count drops below the threshold
+      and the account unlocks automatically — no admin action required.
+    · Every attempt (failure and success) is recorded in LoginAttempt for
+      audit purposes.  On a successful login, previous failure records for
+      the account are cleared so a single typo before a correct password
+      does not accumulate toward the next lockout.
+
+    Why account-scoping instead of IP-scoping:
+    · IP blocking causes collateral damage for users behind shared NAT
+      (a classroom, a home router) and is easily bypassed with a new IP.
+    · Account-scoping precisely targets the account under attack without
+      affecting other users, and forces a real slow-down on credential
+      stuffing even when the attacker rotates IPs.
+
+    Usability choices:
+    · The lockout message shows the remaining wait time in whole minutes
+      so a legitimate user knows exactly how long to wait.
+    · The counter resets on a successful login; a user who makes one typo
+      then succeeds is not penalised on subsequent sessions.
+    · The lockout is enforced before the form is submitted to Django's
+      authentication backend, so locked accounts are never queried.
+    """
+
     template_name = 'idan_muteruz/login.html'
     redirect_authenticated_user = True
     next_page = reverse_lazy('idan_muteruz:dashboard')
+
+    def post(self, request, *args, **kwargs):
+        username = request.POST.get('username', '').strip()
+        if username and _recent_failures(username) >= _max_attempts():
+            expires_at = _lockout_expires_at(username)
+            if expires_at:
+                remaining_secs = (expires_at - timezone.now()).total_seconds()
+                remaining_mins = max(int(remaining_secs // 60) + 1, 1)
+                wait_msg = f'Please try again in {remaining_mins} minute(s).'
+            else:
+                wait_msg = 'Please try again later.'
+            messages.error(
+                request,
+                f'Too many failed sign-in attempts. {wait_msg}',
+            )
+            return redirect('idan_muteruz:login')
+        return super().post(request, *args, **kwargs)
+
+    def form_invalid(self, form):
+        """Called by Django's LoginView when authentication fails."""
+        username = self.request.POST.get('username', '').strip()
+        LoginAttempt.objects.create(
+            username=username,
+            ip_address=_get_client_ip(self.request),
+            succeeded=False,
+        )
+        return super().form_invalid(form)
+
+    def form_valid(self, form):
+        """Called by Django's LoginView after successful authentication."""
+        username = form.cleaned_data.get('username', '')
+        # Clear previous failures so the counter resets after a successful login.
+        LoginAttempt.objects.filter(username__iexact=username, succeeded=False).delete()
+        # Record the success for the audit log.
+        LoginAttempt.objects.create(
+            username=username,
+            ip_address=_get_client_ip(self.request),
+            succeeded=True,
+        )
+        return super().form_valid(form)
 
 
 class UserLogoutView(LogoutView):

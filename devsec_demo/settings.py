@@ -126,6 +126,10 @@ LOGIN_REDIRECT_URL = '/dashboard/'
 LOGOUT_REDIRECT_URL = '/login/'
 LOGIN_URL = '/login/'
 
-LOGIN_REDIRECT_URL = '/dashboard/'
-LOGOUT_REDIRECT_URL = '/login/'
-LOGIN_URL = '/login/'
+# ── Brute-force / login-throttling ──────────────────────────────────────────
+# Number of consecutive failures before a temporary lockout is enforced.
+LOGIN_MAX_ATTEMPTS = int(os.environ.get('LOGIN_MAX_ATTEMPTS', '5'))
+# Duration of the sliding window and the lockout period, in seconds.
+# A failure counts toward the limit only if it falls within this window.
+# Default: 15 minutes.
+LOGIN_LOCKOUT_SECONDS = int(os.environ.get('LOGIN_LOCKOUT_SECONDS', '900'))

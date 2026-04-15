@@ -1,10 +1,13 @@
+from datetime import timedelta
+
 from django.contrib.auth import get_user_model
 from django.contrib.auth.models import Group, Permission
 from django.contrib.contenttypes.models import ContentType
-from django.test import TestCase
+from django.test import TestCase, override_settings
 from django.urls import reverse
+from django.utils import timezone
 
-from .models import Profile
+from .models import LoginAttempt, Profile
 
 User = get_user_model()
 
@@ -630,3 +633,256 @@ class IDORTests(RBACTestBase):
         self.assertIn(self.admins_group, self.staff_user.groups.all())
         # Restore
         self.staff_user.groups.clear()
+
+
+# =============================================================================
+# Brute-force / login-throttling tests
+# =============================================================================
+
+LOGIN_URL = '/idan_muteruz/login/'
+
+# Use tight settings so tests run fast and are easy to reason about.
+THROTTLE_SETTINGS = dict(
+    LOGIN_MAX_ATTEMPTS=3,
+    LOGIN_LOCKOUT_SECONDS=60,   # 1-minute window for tests
+)
+
+
+@override_settings(**THROTTLE_SETTINGS)
+class BruteForceProtectionTests(TestCase):
+    """
+    Verify that the brute-force protection layer in UserLoginView behaves
+    correctly under normal use and under abuse.
+
+    Settings override:
+        LOGIN_MAX_ATTEMPTS = 3
+        LOGIN_LOCKOUT_SECONDS = 60 (1-minute sliding window)
+    """
+
+    def setUp(self):
+        self.url = reverse('idan_muteruz:login')
+        self.username = 'victim'
+        self.password = 'CorrectP@ss999'
+        self.user = User.objects.create_user(
+            username=self.username,
+            email='victim@example.com',
+            password=self.password,
+        )
+
+    # ── helpers ───────────────────────────────────────────────────────────────
+
+    def _post_login(self, username=None, password=None, **kwargs):
+        return self.client.post(self.url, {
+            'username': username or self.username,
+            'password': password or self.password,
+        }, **kwargs)
+
+    def _fail_n_times(self, n, username=None):
+        for _ in range(n):
+            self._post_login(username=username or self.username, password='wrong')
+
+    # ── normal-use tests ──────────────────────────────────────────────────────
+
+    def test_correct_credentials_log_user_in(self):
+        """Happy path: correct credentials redirect to dashboard."""
+        response = self._post_login()
+        self.assertRedirects(
+            response,
+            reverse('idan_muteruz:dashboard'),
+            fetch_redirect_response=False,
+        )
+
+    def test_correct_credentials_record_success(self):
+        """Successful login creates a LoginAttempt row with succeeded=True."""
+        self._post_login()
+        self.assertTrue(
+            LoginAttempt.objects.filter(
+                username__iexact=self.username, succeeded=True
+            ).exists()
+        )
+
+    def test_wrong_password_shows_form_again(self):
+        """A single wrong password stays on the login page (HTTP 200)."""
+        response = self._post_login(password='wrong')
+        self.assertEqual(response.status_code, 200)
+
+    def test_failed_login_records_attempt(self):
+        """Each failed attempt creates one LoginAttempt row with succeeded=False."""
+        self._fail_n_times(2)
+        self.assertEqual(
+            LoginAttempt.objects.filter(
+                username__iexact=self.username, succeeded=False
+            ).count(),
+            2,
+        )
+
+    def test_failed_login_below_threshold_is_not_locked(self):
+        """One attempt below the limit does not trigger lockout."""
+        self._fail_n_times(2)   # max = 3; still one below
+        response = self._post_login()
+        self.assertRedirects(
+            response,
+            reverse('idan_muteruz:dashboard'),
+            fetch_redirect_response=False,
+        )
+
+    # ── lockout tests ─────────────────────────────────────────────────────────
+
+    def test_lockout_after_max_failures(self):
+        """After LOGIN_MAX_ATTEMPTS failures the next attempt is redirected."""
+        self._fail_n_times(3)
+        response = self._post_login()
+        self.assertRedirects(
+            response,
+            self.url,
+            fetch_redirect_response=False,
+        )
+
+    def test_lockout_message_shown_to_user(self):
+        """The lockout redirect carries a flash error message."""
+        self._fail_n_times(3)
+        response = self._post_login(follow=True)
+        messages_list = list(response.context['messages'])
+        self.assertTrue(
+            any('Too many failed sign-in attempts' in str(m) for m in messages_list),
+            'Expected lockout message not found in response',
+        )
+
+    def test_lockout_message_includes_wait_time(self):
+        """The lockout message tells the user how many minutes to wait."""
+        self._fail_n_times(3)
+        response = self._post_login(follow=True)
+        messages_list = list(response.context['messages'])
+        text = ' '.join(str(m) for m in messages_list)
+        self.assertIn('minute', text)
+
+    def test_correct_password_during_lockout_is_still_rejected(self):
+        """
+        Even with the correct password, a locked account must be rejected.
+        This is the critical property: locking must happen before auth.
+        """
+        self._fail_n_times(3)
+        response = self._post_login(password=self.password)
+        self.assertRedirects(
+            response,
+            self.url,
+            fetch_redirect_response=False,
+        )
+        # User must NOT be logged in
+        self.assertNotIn('_auth_user_id', self.client.session)
+
+    def test_lockout_does_not_add_extra_failure_record(self):
+        """
+        A request rejected by the lockout guard should not record an
+        additional LoginAttempt row (the lock check fires before the form).
+        """
+        self._fail_n_times(3)
+        count_before = LoginAttempt.objects.filter(
+            username__iexact=self.username, succeeded=False
+        ).count()
+        self._post_login(password=self.password)   # locked — never reaches auth
+        count_after = LoginAttempt.objects.filter(
+            username__iexact=self.username, succeeded=False
+        ).count()
+        self.assertEqual(count_before, count_after)
+
+    def test_lockout_is_per_account_not_global(self):
+        """
+        Failures on one account must not affect a different account.
+        """
+        other = User.objects.create_user(
+            username='other', password='OtherP@ss999'
+        )
+        self._fail_n_times(3, username=self.username)
+        # 'other' should still be able to log in normally
+        response = self.client.post(self.url, {
+            'username': 'other',
+            'password': 'OtherP@ss999',
+        })
+        self.assertRedirects(
+            response,
+            reverse('idan_muteruz:dashboard'),
+            fetch_redirect_response=False,
+        )
+
+    # ── window / expiry tests ─────────────────────────────────────────────────
+
+    def test_old_failures_outside_window_do_not_count(self):
+        """
+        Failures older than LOGIN_LOCKOUT_SECONDS fall outside the window
+        and must not contribute to the lockout counter.
+        """
+        # Create 3 failure rows, then back-date them outside the window.
+        # (auto_now_add=True ignores values in create(), so we use update().)
+        for _ in range(3):
+            LoginAttempt.objects.create(username=self.username, succeeded=False)
+        LoginAttempt.objects.filter(
+            username__iexact=self.username, succeeded=False
+        ).update(timestamp=timezone.now() - timedelta(seconds=61))
+
+        # Those 3 old failures should NOT trigger lockout
+        response = self._post_login()
+        self.assertRedirects(
+            response,
+            reverse('idan_muteruz:dashboard'),
+            fetch_redirect_response=False,
+        )
+
+    def test_unlock_after_window_expires(self):
+        """
+        After the lockout window passes, the account becomes accessible again.
+        Simulated by back-dating all existing failure records.
+        """
+        self._fail_n_times(3)
+        # Back-date all failure records to be outside the window
+        LoginAttempt.objects.filter(
+            username__iexact=self.username, succeeded=False
+        ).update(timestamp=timezone.now() - timedelta(seconds=61))
+
+        response = self._post_login()
+        self.assertRedirects(
+            response,
+            reverse('idan_muteruz:dashboard'),
+            fetch_redirect_response=False,
+        )
+
+    # ── counter-reset tests ───────────────────────────────────────────────────
+
+    def test_successful_login_clears_failure_records(self):
+        """
+        A successful login deletes previous failure rows for that username,
+        so the counter starts fresh on the next session.
+        """
+        self._fail_n_times(2)
+        self.assertEqual(
+            LoginAttempt.objects.filter(
+                username__iexact=self.username, succeeded=False
+            ).count(),
+            2,
+        )
+        self._post_login(password=self.password)
+        self.assertEqual(
+            LoginAttempt.objects.filter(
+                username__iexact=self.username, succeeded=False
+            ).count(),
+            0,
+            'Failure records should have been cleared on successful login',
+        )
+
+    def test_after_successful_login_fresh_failures_count_again(self):
+        """
+        After logging in (which resets the counter), subsequent failures must
+        accumulate and eventually trigger a lockout again.
+        """
+        # Fail twice, succeed once (clears failures), fail 3 more times
+        self._fail_n_times(2)
+        self._post_login(password=self.password)
+        self.client.logout()
+        self._fail_n_times(3)
+        # Now the counter is back at max — should be locked
+        response = self._post_login()
+        self.assertRedirects(
+            response,
+            self.url,
+            fetch_redirect_response=False,
+        )
