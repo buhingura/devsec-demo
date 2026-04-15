@@ -1070,3 +1070,275 @@ class CsrfProtectionTests(TestCase):
         """GET to the registration page must work normally."""
         response = self.csrf_client.get(reverse('idan_muteruz:register'))
         self.assertEqual(response.status_code, 200)
+
+
+# =============================================================================
+# Open-redirect tests
+# =============================================================================
+
+class OpenRedirectTests(TestCase):
+    """
+    Prove that every redirect target accepted by an auth-flow view is
+    validated with ``url_has_allowed_host_and_scheme`` before use.
+
+    Audit summary (branch: assignment/fix-open-redirect)
+    -----------------------------------------------------
+    Issue 1 — Template gap (login.html, register.html):
+        Neither template included ``<input type="hidden" name="next" …>``.
+        Django's ``RedirectURLMixin`` reads ``next`` from POST *first*, then
+        falls back to GET.  Without the hidden field the value depended on
+        the query string being preserved through the form POST — which is
+        normally true but not guaranteed across all proxy/browser
+        configurations.  Fixed: both templates now include the hidden field
+        with the pre-validated value from the view's context.
+
+    Issue 2 — RegisterView lacked next handling:
+        ``RegisterView`` hardcoded ``success_url = reverse_lazy('…:login')``.
+        Users arriving at ``/register/?next=/profile/`` were silently sent to
+        plain ``/login/`` with no onward destination.  Worse, adding ``next``
+        support naively — ``request.GET.get('next')`` without validation —
+        would have been an open redirect.  Fixed: ``get_success_url()`` now
+        calls ``_safe_next_url()`` and only appends a validated same-host URL
+        to the login redirect.
+
+    Issue 3 — Lockout redirect lost the next parameter:
+        ``UserLoginView.post()`` did ``return redirect('idan_muteruz:login')``
+        on lockout, silently discarding a valid ``next`` URL the user already
+        held.  Fixed: the lockout handler now calls ``_safe_next_url()`` and
+        appends the validated value to the login URL.
+
+    Not an issue:
+        ``UserLoginView`` and ``UserLogoutView`` inherit
+        ``RedirectURLMixin.get_redirect_url()``, which calls
+        ``url_has_allowed_host_and_scheme`` on every ``next`` parameter.
+        No additional override is required; the protection is structural.
+    """
+
+    def setUp(self):
+        self.password = 'StrongP@ss123'
+        self.user = User.objects.create_user(
+            username='redirecttest',
+            email='redirect@example.com',
+            password=self.password,
+        )
+        self.login_url = reverse('idan_muteruz:login')
+        self.register_url = reverse('idan_muteruz:register')
+        self.logout_url = reverse('idan_muteruz:logout')
+        self.dashboard_url = reverse('idan_muteruz:dashboard')
+        self.profile_url = reverse('idan_muteruz:profile')
+
+    # ── helpers ───────────────────────────────────────────────────────────────
+
+    def _post_login(self, next_param=None, follow=False):
+        url = self.login_url
+        if next_param:
+            url = f'{url}?next={next_param}'
+        return self.client.post(
+            url,
+            {'username': self.user.username, 'password': self.password},
+            follow=follow,
+        )
+
+    # ── login — external next is blocked ─────────────────────────────────────
+
+    def test_login_external_next_redirects_to_dashboard(self):
+        """An external ``next`` URL must be rejected; user lands on dashboard."""
+        response = self._post_login(next_param='http://evil.com/')
+        self.assertRedirects(
+            response,
+            self.dashboard_url,
+            fetch_redirect_response=False,
+        )
+
+    def test_login_protocol_relative_next_is_blocked(self):
+        """Protocol-relative ``//evil.com`` must be rejected."""
+        response = self._post_login(next_param='//evil.com/steal')
+        self.assertRedirects(
+            response,
+            self.dashboard_url,
+            fetch_redirect_response=False,
+        )
+
+    def test_login_internal_next_is_honoured(self):
+        """A safe same-host ``next`` URL must be followed after login."""
+        response = self._post_login(next_param=self.profile_url)
+        self.assertRedirects(
+            response,
+            self.profile_url,
+            fetch_redirect_response=False,
+        )
+
+    def test_login_next_in_post_body_is_validated(self):
+        """``next`` supplied in the POST body (hidden field) must also be
+        validated — external targets must be rejected."""
+        response = self.client.post(
+            self.login_url,
+            {
+                'username': self.user.username,
+                'password': self.password,
+                'next': 'http://evil.com/',
+            },
+        )
+        self.assertRedirects(
+            response,
+            self.dashboard_url,
+            fetch_redirect_response=False,
+        )
+
+    def test_login_post_body_internal_next_is_honoured(self):
+        """``next`` in the POST body pointing to an internal URL must work."""
+        response = self.client.post(
+            self.login_url,
+            {
+                'username': self.user.username,
+                'password': self.password,
+                'next': self.profile_url,
+            },
+        )
+        self.assertRedirects(
+            response,
+            self.profile_url,
+            fetch_redirect_response=False,
+        )
+
+    # ── logout — external next is blocked ────────────────────────────────────
+
+    def test_logout_external_next_redirects_to_login(self):
+        """An external ``next`` after logout must be rejected; user lands on login."""
+        self.client.force_login(self.user)
+        response = self.client.post(
+            f'{self.logout_url}?next=http://evil.com/',
+        )
+        self.assertRedirects(
+            response,
+            self.login_url,
+            fetch_redirect_response=False,
+        )
+
+    def test_logout_internal_next_is_honoured(self):
+        """A safe same-host ``next`` after logout must be followed."""
+        self.client.force_login(self.user)
+        # Use the register page as an internal destination that is
+        # accessible without authentication.
+        response = self.client.post(
+            f'{self.logout_url}?next={self.register_url}',
+        )
+        self.assertRedirects(
+            response,
+            self.register_url,
+            fetch_redirect_response=False,
+        )
+
+    # ── register — external next is blocked ──────────────────────────────────
+
+    def test_register_external_next_redirects_to_plain_login(self):
+        """After registration, an external ``next`` must be rejected."""
+        response = self.client.post(
+            f'{self.register_url}?next=http://evil.com/',
+            {
+                'username': 'newuser_ortest',
+                'email': 'new@example.com',
+                'first_name': 'Test',
+                'last_name': 'User',
+                'password1': self.password,
+                'password2': self.password,
+            },
+        )
+        self.assertRedirects(
+            response,
+            self.login_url,
+            fetch_redirect_response=False,
+        )
+
+    def test_register_protocol_relative_next_is_blocked(self):
+        """Protocol-relative URLs after registration must be rejected."""
+        response = self.client.post(
+            f'{self.register_url}?next=//evil.com/',
+            {
+                'username': 'newuser_proto',
+                'email': 'proto@example.com',
+                'first_name': 'Test',
+                'last_name': 'User',
+                'password1': self.password,
+                'password2': self.password,
+            },
+        )
+        self.assertRedirects(
+            response,
+            self.login_url,
+            fetch_redirect_response=False,
+        )
+
+    def test_register_internal_next_is_passed_to_login(self):
+        """After registration with a safe ``next``, the login URL carries it."""
+        response = self.client.post(
+            f'{self.register_url}?next={self.profile_url}',
+            {
+                'username': 'newuser_internal',
+                'email': 'internal@example.com',
+                'first_name': 'Test',
+                'last_name': 'User',
+                'password1': self.password,
+                'password2': self.password,
+            },
+        )
+        expected = f'{self.login_url}?next={self.profile_url}'
+        self.assertRedirects(
+            response,
+            expected,
+            fetch_redirect_response=False,
+        )
+
+    def test_register_next_via_post_body_external_is_blocked(self):
+        """``next`` in the register POST body must also be validated."""
+        response = self.client.post(
+            self.register_url,
+            {
+                'username': 'newuser_postbody',
+                'email': 'postbody@example.com',
+                'first_name': 'Test',
+                'last_name': 'User',
+                'password1': self.password,
+                'password2': self.password,
+                'next': 'http://evil.com/',
+            },
+        )
+        self.assertRedirects(
+            response,
+            self.login_url,
+            fetch_redirect_response=False,
+        )
+
+    # ── hidden-field propagation ──────────────────────────────────────────────
+
+    def test_login_template_exposes_next_in_context(self):
+        """The login template context must contain a validated ``next`` value
+        so the hidden field can be rendered."""
+        response = self.client.get(f'{self.login_url}?next={self.profile_url}')
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.context['next'], self.profile_url)
+
+    def test_login_template_external_next_is_empty_in_context(self):
+        """An external ``next`` must result in an empty context value
+        (so the hidden field is not rendered for unsafe URLs)."""
+        response = self.client.get(
+            f'{self.login_url}?next=http://evil.com/'
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.context.get('next', ''), '')
+
+    def test_register_template_exposes_next_in_context(self):
+        """The register template context must contain a validated ``next`` value."""
+        response = self.client.get(
+            f'{self.register_url}?next={self.profile_url}'
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.context['next'], self.profile_url)
+
+    def test_register_template_external_next_is_empty_in_context(self):
+        """An external ``next`` must result in an empty context value for register."""
+        response = self.client.get(
+            f'{self.register_url}?next=http://evil.com/'
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.context.get('next', ''), '')

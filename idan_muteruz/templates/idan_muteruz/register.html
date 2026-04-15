@@ -15,6 +15,10 @@
 
         <form method="post" novalidate>
             {% csrf_token %}
+            {# Carry the validated next URL through the POST so get_success_url() #}
+            {# can forward users to their intended destination after sign-in.      #}
+            {# Value is pre-validated by RegisterView.get_context_data().         #}
+            {% if next %}<input type="hidden" name="next" value="{{ next }}">{% endif %}
 
             {% if form.non_field_errors %}
                 <div class="ferrors-box">{{ form.non_field_errors }}</div>

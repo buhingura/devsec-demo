@@ -15,6 +15,11 @@
 
         <form method="post" novalidate>
             {% csrf_token %}
+            {# Carry the validated next URL through the form POST so Django's  #}
+            {# RedirectURLMixin can pick it up from request.POST instead of    #}
+            {# relying solely on the query string (which some proxies strip).  #}
+            {# The value is already sanitised by LoginView.get_context_data(). #}
+            {% if next %}<input type="hidden" name="next" value="{{ next }}">{% endif %}
 
             {% if form.non_field_errors %}
                 <div class="ferrors-box">{{ form.non_field_errors }}</div>
@@ -43,7 +48,8 @@
     </div>
 
     <div class="auth-foot">
-        Don't have an account? <a href="{% url 'idan_muteruz:register' %}">Create one</a>
+        Don't have an account?
+        <a href="{% url 'idan_muteruz:register' %}{% if next %}?next={{ next|urlencode }}{% endif %}">Create one</a>
     </div>
 </div>
 {% endblock %}

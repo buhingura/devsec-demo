@@ -1,4 +1,5 @@
 from datetime import timedelta
+from urllib.parse import urlencode
 
 from django.conf import settings
 from django.contrib import messages
@@ -9,8 +10,9 @@ from django.contrib.auth.views import LoginView, LogoutView, PasswordChangeView
 from django.contrib.messages.views import SuccessMessageMixin
 from django.core.exceptions import PermissionDenied
 from django.shortcuts import get_object_or_404, redirect
-from django.urls import reverse_lazy
+from django.urls import reverse, reverse_lazy
 from django.utils import timezone
+from django.utils.http import url_has_allowed_host_and_scheme
 from django.views.generic import FormView, RedirectView, TemplateView, View
 
 from .forms import (
@@ -71,6 +73,36 @@ def _get_client_ip(request) -> str | None:
     return request.META.get('REMOTE_ADDR')
 
 
+# ---------------------------------------------------------------------------
+# Open-redirect guard
+# ---------------------------------------------------------------------------
+
+def _safe_next_url(request, fallback: str = '') -> str:
+    """
+    Return the ``next`` parameter from the request only if it is a safe,
+    same-host URL.  Returns *fallback* for any URL that does not pass the
+    safety check.
+
+    Safety check (Django's ``url_has_allowed_host_and_scheme``):
+    · Rejects absolute URLs pointing to other hosts  (``http://evil.com/``)
+    · Rejects protocol-relative URLs                 (``//evil.com/``)
+    · Rejects empty/None values
+    · Accepts absolute paths on the same host        (``/dashboard/``)
+    · When the current request is HTTPS, rejects any non-HTTPS target
+
+    POST is checked before GET so that the hidden form field takes
+    precedence over the query string.
+    """
+    url = request.POST.get('next') or request.GET.get('next', '')
+    if url and url_has_allowed_host_and_scheme(
+        url=url,
+        allowed_hosts={request.get_host()},
+        require_https=request.is_secure(),
+    ):
+        return url
+    return fallback
+
+
 class HomeRedirectView(RedirectView):
     pattern_name = 'idan_muteruz:login'
     permanent = False
@@ -82,14 +114,44 @@ class HomeRedirectView(RedirectView):
 
 
 class RegisterView(FormView):
+    """
+    Registration view.
+
+    Open-redirect note:
+    A ``next`` parameter may arrive in the query string when an
+    unauthenticated user is redirected from a protected page to register
+    (e.g. ``/register/?next=/dashboard/``).  After successful registration
+    the user still needs to sign in, so we forward them to the login page.
+    If a validated ``next`` URL is present we append it to the login URL so
+    the user reaches their intended destination after signing in.
+
+    Validation is performed by ``_safe_next_url()``, which calls Django's
+    ``url_has_allowed_host_and_scheme``.  Any URL that does not pass —
+    external hosts, protocol-relative URLs — is silently discarded and the
+    user lands on plain ``/login/``.
+    """
+
     template_name = 'idan_muteruz/register.html'
     form_class = RegistrationForm
-    success_url = reverse_lazy('idan_muteruz:login')
 
     def dispatch(self, request, *args, **kwargs):
         if request.user.is_authenticated:
             return redirect('idan_muteruz:dashboard')
         return super().dispatch(request, *args, **kwargs)
+
+    def get_success_url(self):
+        login_url = reverse('idan_muteruz:login')
+        next_url = _safe_next_url(self.request)
+        if next_url:
+            return f'{login_url}?{urlencode({"next": next_url})}'
+        return login_url
+
+    def get_context_data(self, **kwargs):
+        context = super().get_context_data(**kwargs)
+        # Expose the validated next URL to the template so the hidden field
+        # can survive the POST → redirect chain without re-reading raw input.
+        context['next'] = _safe_next_url(self.request)
+        return context
 
     def form_valid(self, form):
         user = form.save()
@@ -129,6 +191,16 @@ class UserLoginView(LoginView):
       then succeeds is not penalised on subsequent sessions.
     · The lockout is enforced before the form is submitted to Django's
       authentication backend, so locked accounts are never queried.
+
+    Open-redirect protection:
+    · ``next`` parameter validation is handled by the parent class through
+      ``RedirectURLMixin.get_redirect_url()``, which calls Django's
+      ``url_has_allowed_host_and_scheme``.  Any external or protocol-relative
+      URL is rejected and the user is sent to ``next_page`` (dashboard)
+      instead.  No override is needed here — the protection is structural.
+    · The lockout-redirect path below uses ``_safe_next_url()`` to preserve
+      a validated ``next`` value across the lockout bounce so that a
+      legitimate user does not lose their intended destination.
     """
 
     template_name = 'idan_muteruz/login.html'
@@ -149,7 +221,15 @@ class UserLoginView(LoginView):
                 request,
                 f'Too many failed sign-in attempts. {wait_msg}',
             )
-            return redirect('idan_muteruz:login')
+            # Preserve a validated next URL across the lockout bounce so the
+            # user does not lose their destination.  _safe_next_url() rejects
+            # any external or protocol-relative URL before it enters the
+            # redirect target, preventing open-redirect via the lockout path.
+            login_url = reverse('idan_muteruz:login')
+            next_url = _safe_next_url(request)
+            if next_url:
+                login_url = f'{login_url}?{urlencode({"next": next_url})}'
+            return redirect(login_url)
         return super().post(request, *args, **kwargs)
 
     def form_invalid(self, form):
