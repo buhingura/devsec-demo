@@ -2,10 +2,13 @@ from datetime import timedelta
 
 from django.contrib.auth import get_user_model
 from django.contrib.auth.models import Group, Permission
+from django.contrib.auth.tokens import default_token_generator
 from django.contrib.contenttypes.models import ContentType
 from django.test import Client, TestCase, override_settings
 from django.urls import reverse
 from django.utils import timezone
+from django.utils.encoding import force_bytes
+from django.utils.http import urlsafe_base64_encode
 
 from .models import LoginAttempt, Profile
 
@@ -1388,4 +1391,290 @@ class OpenRedirectTests(TestCase):
         # Must redirect to plain login, not to evil.com
         self.assertRedirects(
             response, self.login_url, fetch_redirect_response=False
+        )
+
+
+class AuditLoggingTests(TestCase):
+    """
+    Verify that every security-relevant event emits an audit log record via
+    the ``idan_muteruz.audit`` logger.
+
+    Each test uses Django's ``assertLogs`` context manager, which installs a
+    temporary handler for the named logger and collects records as strings in
+    the form ``"LEVEL:logger.name:message"``.
+
+    What is checked:
+    · The correct event token (e.g. ``LOGIN_SUCCESS``) appears in at least
+      one record.
+    · Key context fields (username, email, actor/target) appear in the
+      record alongside the event.
+
+    What is explicitly NOT checked (to avoid false positives):
+    · Exact IP addresses (127.0.0.1 in tests, varies in prod).
+    · Timestamps (handled by the formatter, not the message body).
+
+    What must NEVER appear in any log record:
+    · Raw passwords or password hashes.
+    · Session IDs or reset tokens.
+    """
+
+    AUDIT_LOGGER = 'idan_muteruz.audit'
+    PASSWORD = 'AuditP@ss999'
+
+    def setUp(self):
+        self.user = User.objects.create_user(
+            username='audituser',
+            email='audit@example.com',
+            password=self.PASSWORD,
+        )
+        self.login_url = reverse('idan_muteruz:login')
+        self.logout_url = reverse('idan_muteruz:logout')
+        self.register_url = reverse('idan_muteruz:register')
+        self.password_change_url = reverse('idan_muteruz:password_change')
+        self.password_reset_url = reverse('idan_muteruz:password_reset')
+
+    # ── helpers ───────────────────────────────────────────────────────────────
+
+    def _assert_event(self, log_output, event, **fields):
+        """Assert that *event* appears in at least one line of *log_output*,
+        and that every field in *fields* also appears in that same line."""
+        matching = [line for line in log_output if event in line]
+        self.assertTrue(
+            matching,
+            f'Expected audit event {event!r} not found in log output:\n'
+            + '\n'.join(log_output),
+        )
+        for key, value in fields.items():
+            self.assertTrue(
+                any(str(value) in line for line in matching),
+                f'Field {key}={value!r} not found in any {event!r} log line:\n'
+                + '\n'.join(matching),
+            )
+
+    def _assert_not_in_logs(self, log_output, forbidden):
+        """Assert that *forbidden* text does not appear anywhere in the logs."""
+        for line in log_output:
+            self.assertNotIn(
+                forbidden,
+                line,
+                f'Forbidden value {forbidden!r} found in audit log: {line!r}',
+            )
+
+    # ── REGISTER ─────────────────────────────────────────────────────────────
+
+    def test_register_emits_audit_log(self):
+        """Successful registration must emit a REGISTER record."""
+        with self.assertLogs(self.AUDIT_LOGGER, level='INFO') as log:
+            self.client.post(self.register_url, {
+                'username': 'newaudituser',
+                'email': 'newaudit@example.com',
+                'first_name': 'New',
+                'last_name': 'User',
+                'password1': self.PASSWORD,
+                'password2': self.PASSWORD,
+            })
+        self._assert_event(log.output, 'REGISTER',
+                           username='newaudituser', email='newaudit@example.com')
+
+    def test_register_does_not_log_password(self):
+        """The registration audit record must never contain the password."""
+        with self.assertLogs(self.AUDIT_LOGGER, level='INFO') as log:
+            self.client.post(self.register_url, {
+                'username': 'pwdcheckuser',
+                'email': 'pwdcheck@example.com',
+                'first_name': 'Pwd',
+                'last_name': 'Check',
+                'password1': self.PASSWORD,
+                'password2': self.PASSWORD,
+            })
+        self._assert_not_in_logs(log.output, self.PASSWORD)
+
+    # ── LOGIN_SUCCESS ─────────────────────────────────────────────────────────
+
+    def test_login_success_emits_audit_log(self):
+        """Successful authentication must emit a LOGIN_SUCCESS record."""
+        with self.assertLogs(self.AUDIT_LOGGER, level='INFO') as log:
+            self.client.post(self.login_url, {
+                'username': self.user.username,
+                'password': self.PASSWORD,
+            })
+        self._assert_event(log.output, 'LOGIN_SUCCESS', username=self.user.username)
+
+    def test_login_success_does_not_log_password(self):
+        """The LOGIN_SUCCESS record must never contain the password."""
+        with self.assertLogs(self.AUDIT_LOGGER, level='INFO') as log:
+            self.client.post(self.login_url, {
+                'username': self.user.username,
+                'password': self.PASSWORD,
+            })
+        self._assert_not_in_logs(log.output, self.PASSWORD)
+
+    # ── LOGIN_FAILURE ─────────────────────────────────────────────────────────
+
+    def test_login_failure_emits_audit_log(self):
+        """A failed login attempt must emit a LOGIN_FAILURE record."""
+        with self.assertLogs(self.AUDIT_LOGGER, level='INFO') as log:
+            self.client.post(self.login_url, {
+                'username': self.user.username,
+                'password': 'wrongpassword',
+            })
+        self._assert_event(log.output, 'LOGIN_FAILURE', username=self.user.username)
+
+    def test_login_failure_does_not_log_attempted_password(self):
+        """The LOGIN_FAILURE record must never contain the attempted password."""
+        wrong_pwd = 'WrongP@ssw0rd!'
+        with self.assertLogs(self.AUDIT_LOGGER, level='INFO') as log:
+            self.client.post(self.login_url, {
+                'username': self.user.username,
+                'password': wrong_pwd,
+            })
+        self._assert_not_in_logs(log.output, wrong_pwd)
+
+    # ── LOGIN_LOCKED ──────────────────────────────────────────────────────────
+
+    @override_settings(LOGIN_MAX_ATTEMPTS=3, LOGIN_LOCKOUT_SECONDS=60)
+    def test_lockout_emits_audit_log(self):
+        """Triggering the lockout guard must emit a LOGIN_LOCKED record."""
+        # Exhaust the allowed attempts.
+        for _ in range(3):
+            self.client.post(self.login_url,
+                             {'username': self.user.username, 'password': 'wrong'})
+        # This attempt is rejected by the lockout guard before authentication.
+        with self.assertLogs(self.AUDIT_LOGGER, level='INFO') as log:
+            self.client.post(self.login_url, {
+                'username': self.user.username,
+                'password': self.PASSWORD,
+            })
+        self._assert_event(log.output, 'LOGIN_LOCKED', username=self.user.username)
+
+    # ── LOGOUT ────────────────────────────────────────────────────────────────
+
+    def test_logout_emits_audit_log(self):
+        """Logging out must emit a LOGOUT record containing the username."""
+        self.client.force_login(self.user)
+        with self.assertLogs(self.AUDIT_LOGGER, level='INFO') as log:
+            self.client.post(self.logout_url)
+        self._assert_event(log.output, 'LOGOUT', username=self.user.username)
+
+    # ── PASSWORD_CHANGE ───────────────────────────────────────────────────────
+
+    def test_password_change_emits_audit_log(self):
+        """Changing a password must emit a PASSWORD_CHANGE record."""
+        self.client.force_login(self.user)
+        new_password = 'NewAuditP@ss999'
+        with self.assertLogs(self.AUDIT_LOGGER, level='INFO') as log:
+            self.client.post(self.password_change_url, {
+                'old_password': self.PASSWORD,
+                'new_password1': new_password,
+                'new_password2': new_password,
+            })
+        self._assert_event(log.output, 'PASSWORD_CHANGE', username=self.user.username)
+
+    def test_password_change_does_not_log_passwords(self):
+        """Neither the old nor the new password must appear in the log."""
+        self.client.force_login(self.user)
+        new_password = 'NewAuditP@ss999'
+        with self.assertLogs(self.AUDIT_LOGGER, level='INFO') as log:
+            self.client.post(self.password_change_url, {
+                'old_password': self.PASSWORD,
+                'new_password1': new_password,
+                'new_password2': new_password,
+            })
+        self._assert_not_in_logs(log.output, self.PASSWORD)
+        self._assert_not_in_logs(log.output, new_password)
+
+    # ── PASSWORD_RESET_REQUESTED ──────────────────────────────────────────────
+
+    def test_password_reset_request_emits_audit_log(self):
+        """Submitting the password-reset form must emit a PASSWORD_RESET_REQUESTED record."""
+        with self.assertLogs(self.AUDIT_LOGGER, level='INFO') as log:
+            self.client.post(self.password_reset_url, {'email': self.user.email})
+        self._assert_event(log.output, 'PASSWORD_RESET_REQUESTED',
+                           email=self.user.email)
+
+    def test_password_reset_request_for_unknown_email_still_logs(self):
+        """
+        The view must emit a log record even when the e-mail is not
+        registered, because we cannot distinguish registered from unknown
+        in the log (anti-enumeration).
+        """
+        with self.assertLogs(self.AUDIT_LOGGER, level='INFO') as log:
+            self.client.post(self.password_reset_url,
+                             {'email': 'nobody@example.com'})
+        self._assert_event(log.output, 'PASSWORD_RESET_REQUESTED',
+                           email='nobody@example.com')
+
+    # ── PASSWORD_RESET_COMPLETE ───────────────────────────────────────────────
+
+    def test_password_reset_complete_emits_audit_log(self):
+        """Completing the reset flow must emit a PASSWORD_RESET_COMPLETE record."""
+        uid = urlsafe_base64_encode(force_bytes(self.user.pk))
+        token = default_token_generator.make_token(self.user)
+        confirm_url = reverse(
+            'idan_muteruz:password_reset_confirm',
+            kwargs={'uidb64': uid, 'token': token},
+        )
+        # GET validates the token and stores it in the session, then redirects
+        # to the stable "set-password" URL (Django 4.1+ behaviour).
+        redirect_response = self.client.get(confirm_url)
+        set_password_url = redirect_response['Location']
+
+        new_password = 'ResetAuditP@ss999'
+        with self.assertLogs(self.AUDIT_LOGGER, level='INFO') as log:
+            self.client.post(set_password_url, {
+                'new_password1': new_password,
+                'new_password2': new_password,
+            })
+        self._assert_event(log.output, 'PASSWORD_RESET_COMPLETE',
+                           username=self.user.username)
+
+    def test_password_reset_complete_does_not_log_new_password(self):
+        """The reset token and new password must never appear in the log."""
+        uid = urlsafe_base64_encode(force_bytes(self.user.pk))
+        token = default_token_generator.make_token(self.user)
+        confirm_url = reverse(
+            'idan_muteruz:password_reset_confirm',
+            kwargs={'uidb64': uid, 'token': token},
+        )
+        redirect_response = self.client.get(confirm_url)
+        set_password_url = redirect_response['Location']
+
+        new_password = 'ResetAuditP@ss999'
+        with self.assertLogs(self.AUDIT_LOGGER, level='INFO') as log:
+            self.client.post(set_password_url, {
+                'new_password1': new_password,
+                'new_password2': new_password,
+            })
+        self._assert_not_in_logs(log.output, new_password)
+        # The raw token must not appear in the log either.
+        self._assert_not_in_logs(log.output, token)
+
+    # ── ROLE_CHANGE ───────────────────────────────────────────────────────────
+
+    def test_role_change_emits_audit_log(self):
+        """A successful role assignment must emit a ROLE_CHANGE record."""
+        staff = User.objects.create_user(
+            username='auditstaff', password=self.PASSWORD, is_staff=True
+        )
+        target = User.objects.create_user(
+            username='audittarget', password=self.PASSWORD
+        )
+        instructors = Group.objects.get_or_create(name='Instructors')[0]
+        target.groups.add(instructors)   # give target an initial group
+
+        students = Group.objects.get_or_create(name='Students')[0]
+
+        self.client.force_login(staff)
+        assign_url = reverse('idan_muteruz:assign_role', kwargs={'pk': target.pk})
+
+        with self.assertLogs(self.AUDIT_LOGGER, level='INFO') as log:
+            self.client.post(assign_url, {
+                f'user_{target.pk}-group': students.pk,
+            })
+
+        self._assert_event(
+            log.output,
+            'ROLE_CHANGE',
+            actor='auditstaff',
+            target='audittarget',
         )

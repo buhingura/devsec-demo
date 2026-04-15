@@ -23,6 +23,7 @@ from django.utils import timezone
 from django.utils.http import url_has_allowed_host_and_scheme
 from django.views.generic import FormView, RedirectView, TemplateView, View
 
+from . import audit
 from .forms import (
     AssignRoleForm,
     ProfileForm,
@@ -163,6 +164,7 @@ class RegisterView(FormView):
 
     def form_valid(self, form):
         user = form.save()
+        audit.log('REGISTER', self.request, username=user.username, email=user.email)
         messages.success(self.request, 'Account created successfully. Please sign in.')
         return super().form_valid(form)
 
@@ -225,6 +227,7 @@ class UserLoginView(LoginView):
                 wait_msg = f'Please try again in {remaining_mins} minute(s).'
             else:
                 wait_msg = 'Please try again later.'
+            audit.log('LOGIN_LOCKED', request, username=username, remaining_mins=remaining_mins if expires_at else '?')
             messages.error(
                 request,
                 f'Too many failed sign-in attempts. {wait_msg}',
@@ -248,6 +251,7 @@ class UserLoginView(LoginView):
             ip_address=_get_client_ip(self.request),
             succeeded=False,
         )
+        audit.log('LOGIN_FAILURE', self.request, username=username)
         return super().form_invalid(form)
 
     def form_valid(self, form):
@@ -261,6 +265,7 @@ class UserLoginView(LoginView):
             ip_address=_get_client_ip(self.request),
             succeeded=True,
         )
+        audit.log('LOGIN_SUCCESS', self.request, username=username)
         return super().form_valid(form)
 
 
@@ -277,6 +282,15 @@ class UserLogoutView(LogoutView):
     #   cookies, back to the caller; enabling it is a Cross-Site Tracing
     #   (XST) anti-pattern even though modern browsers block TRACE via XHR.
     http_method_names = ['post', 'options']
+
+    def post(self, request, *args, **kwargs):
+        # Capture the username BEFORE the parent clears request.user.
+        # Django's LogoutView calls auth_logout(request) which replaces
+        # request.user with AnonymousUser, so we must read it first.
+        username = request.user.username if request.user.is_authenticated else ''
+        response = super().post(request, *args, **kwargs)
+        audit.log('LOGOUT', request, username=username)
+        return response
 
 
 class DashboardView(LoginRequiredMixin, TemplateView):
@@ -334,6 +348,10 @@ class UserPasswordChangeView(SuccessMessageMixin, LoginRequiredMixin, PasswordCh
     # IDOR note: Django's PasswordChangeView always binds form.user = request.user
     # (see django/contrib/auth/views.py).  There is no pk or username in the URL,
     # so this view cannot be used to change another user's password.
+
+    def form_valid(self, form):
+        audit.log('PASSWORD_CHANGE', self.request, username=self.request.user.username)
+        return super().form_valid(form)
 
 
 class AdminPanelView(PrivilegedAccessMixin, TemplateView):
@@ -427,8 +445,17 @@ class AssignRoleView(StaffRequiredMixin, View):
 
         form = AssignRoleForm(request.POST, prefix=f'user_{pk}')
         if form.is_valid():
+            old_group = target_user.groups.first()
             group = form.cleaned_data['group']
             target_user.groups.set([group])
+            audit.log(
+                'ROLE_CHANGE',
+                request,
+                actor=request.user.username,
+                target=target_user.username,
+                old_group=old_group.name if old_group else 'none',
+                new_group=group.name,
+            )
             messages.success(
                 request,
                 f"Role updated: {target_user.username} → {group.name}",
@@ -465,6 +492,17 @@ class UserPasswordResetView(PasswordResetView):
     subject_template_name = 'idan_muteruz/email/password_reset_subject.txt'
     success_url = reverse_lazy('idan_muteruz:password_reset_sent')
 
+    def form_valid(self, form):
+        # Log the submitted e-mail address, NOT whether it matched an account
+        # (that distinction must never appear in logs — it would be an
+        # enumeration signal if logs are shared or leaked).
+        audit.log(
+            'PASSWORD_RESET_REQUESTED',
+            self.request,
+            email=form.cleaned_data['email'],
+        )
+        return super().form_valid(form)
+
 
 class UserPasswordResetSentView(PasswordResetDoneView):
     """Step 2 — confirmation page shown after the e-mail is dispatched."""
@@ -484,6 +522,17 @@ class UserPasswordResetConfirmView(PasswordResetConfirmView):
 
     template_name = 'idan_muteruz/password_reset_confirm.html'
     success_url = reverse_lazy('idan_muteruz:password_reset_complete')
+
+    def form_valid(self, form):
+        # form.user is set by Django's SetPasswordForm and is the account
+        # whose password is being reset.  The reset token itself is never
+        # logged — only the outcome and the affected username.
+        audit.log(
+            'PASSWORD_RESET_COMPLETE',
+            self.request,
+            username=form.user.username,
+        )
+        return super().form_valid(form)
 
 
 class UserPasswordResetCompleteView(PasswordResetCompleteView):

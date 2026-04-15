@@ -138,6 +138,41 @@ DEFAULT_FROM_EMAIL = os.environ.get('DEFAULT_FROM_EMAIL', 'noreply@localhost')
 # Token validity window in seconds.  Default: 1 hour.
 PASSWORD_RESET_TIMEOUT = int(os.environ.get('PASSWORD_RESET_TIMEOUT', '3600'))
 
+# ── Audit logging ────────────────────────────────────────────────────────────
+# The ``idan_muteruz.audit`` logger records every security-relevant event
+# (login, register, password change, role assignment, …) as a single
+# INFO-level line in the format:  EVENT key=val [key=val …]
+#
+# In production, replace the console handler with a file handler or a
+# centralised log aggregator.  Never send raw logs to a public endpoint.
+LOGGING = {
+    'version': 1,
+    'disable_existing_loggers': False,
+    'formatters': {
+        'audit': {
+            # ISO-8601 timestamp makes log lines easy to sort and parse.
+            'format': '%(asctime)s %(levelname)s [audit] %(message)s',
+            'datefmt': '%Y-%m-%dT%H:%M:%SZ',
+        },
+    },
+    'handlers': {
+        'audit_console': {
+            'class': 'logging.StreamHandler',
+            'formatter': 'audit',
+            'level': 'INFO',
+        },
+    },
+    'loggers': {
+        'idan_muteruz.audit': {
+            'handlers': ['audit_console'],
+            'level': 'INFO',
+            # Don't propagate to the root logger — audit records should only
+            # appear in the audit stream, not mixed into the general Django log.
+            'propagate': False,
+        },
+    },
+}
+
 # ── Brute-force / login-throttling ──────────────────────────────────────────
 # Number of consecutive failures before a temporary lockout is enforced.
 LOGIN_MAX_ATTEMPTS = int(os.environ.get('LOGIN_MAX_ATTEMPTS', '5'))
