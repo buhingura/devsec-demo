@@ -1,3 +1,4 @@
+import os
 from datetime import timedelta
 from urllib.parse import urlencode
 
@@ -5,6 +6,7 @@ from django.conf import settings
 from django.contrib import messages
 from django.contrib.auth import get_user_model, login
 from django.contrib.auth.mixins import LoginRequiredMixin
+from django.http import FileResponse, Http404
 from django.contrib.auth.models import Group
 from django.contrib.auth.views import (
     LoginView,
@@ -26,13 +28,15 @@ from django.views.generic import FormView, RedirectView, TemplateView, View
 from . import audit
 from .forms import (
     AssignRoleForm,
+    AvatarUploadForm,
+    DocumentUploadForm,
     ProfileForm,
     RegistrationForm,
     CustomPasswordChangeForm,
     UserUpdateForm,
 )
 from .mixins import PrivilegedAccessMixin, StaffRequiredMixin
-from .models import LoginAttempt
+from .models import LoginAttempt, UserDocument
 
 User = get_user_model()
 
@@ -539,3 +543,157 @@ class UserPasswordResetCompleteView(PasswordResetCompleteView):
     """Step 4 — success page shown after the password has been changed."""
 
     template_name = 'idan_muteruz/password_reset_complete.html'
+
+
+# ---------------------------------------------------------------------------
+# File upload / download views
+# ---------------------------------------------------------------------------
+
+class AvatarUploadView(LoginRequiredMixin, View):
+    """
+    POST-only endpoint: replace the logged-in user's profile avatar.
+
+    The file is validated by AvatarUploadForm (size + extension + Pillow
+    verify) before being saved.  The old avatar is deleted from storage when a
+    new one is accepted to prevent accumulation of orphaned files.
+
+    Access control: LoginRequiredMixin ensures only authenticated users can
+    upload.  The upload is always scoped to ``request.user.profile``, so
+    one user cannot replace another user's avatar.
+    """
+
+    login_url = reverse_lazy('idan_muteruz:login')
+    http_method_names = ['post']
+
+    def post(self, request, *args, **kwargs):
+        profile = request.user.profile
+        # Capture the old storage path BEFORE form.is_valid() runs.
+        # form._post_clean() sets profile.avatar to the new file on the
+        # instance, so reading profile.avatar AFTER is_valid() would give
+        # the new file, not the old one.  We capture just the name (a plain
+        # string) so that FieldFile.delete() cannot accidentally reset the
+        # field to None on the instance before form.save() is called.
+        old_avatar_name = profile.avatar.name if profile.avatar else None
+        form = AvatarUploadForm(request.POST, request.FILES, instance=profile)
+        if form.is_valid():
+            form.save()
+            # Remove the previous avatar file from storage AFTER the new one
+            # is safely written, so a storage error on cleanup never prevents
+            # the upload from succeeding.
+            if old_avatar_name:
+                from django.core.files.storage import default_storage
+                try:
+                    default_storage.delete(old_avatar_name)
+                except OSError:
+                    pass  # stale reference — file already gone
+            messages.success(request, 'Avatar updated successfully.')
+        else:
+            for error_list in form.errors.values():
+                for error in error_list:
+                    messages.error(request, error)
+        return redirect('idan_muteruz:profile')
+
+
+class DocumentListView(LoginRequiredMixin, TemplateView):
+    """
+    Lists the documents owned by the logged-in user.
+
+    Scoped to ``request.user`` — a user can only see their own documents.
+    No URL parameter is accepted; IDOR is structurally prevented.
+    """
+
+    template_name = 'idan_muteruz/documents.html'
+    login_url = reverse_lazy('idan_muteruz:login')
+
+    def get_context_data(self, **kwargs):
+        context = super().get_context_data(**kwargs)
+        context['documents'] = UserDocument.objects.filter(owner=self.request.user)
+        context['upload_form'] = DocumentUploadForm()
+        return context
+
+
+class DocumentUploadView(LoginRequiredMixin, View):
+    """
+    POST-only endpoint: upload a new private PDF document.
+
+    The file is validated by DocumentUploadForm (size + extension + magic
+    bytes) before being saved.  The ``original_name`` stored in the database
+    is the client-supplied filename sanitised to its basename only —
+    path components (e.g. ``../../etc/passwd``) are stripped.
+
+    Access control: LoginRequiredMixin + always sets ``owner=request.user``.
+    """
+
+    login_url = reverse_lazy('idan_muteruz:login')
+    http_method_names = ['post']
+
+    def post(self, request, *args, **kwargs):
+        form = DocumentUploadForm(request.POST, request.FILES)
+        if form.is_valid():
+            doc = form.save(commit=False)
+            doc.owner = request.user
+            # Store only the basename to prevent path-traversal payloads in
+            # the display name (e.g. "../../etc/passwd.pdf" → "passwd.pdf").
+            raw_name = request.FILES['file'].name
+            doc.original_name = os.path.basename(raw_name)
+            doc.save()
+            messages.success(request, f'"{doc.original_name}" uploaded successfully.')
+        else:
+            for error_list in form.errors.values():
+                for error in error_list:
+                    messages.error(request, error)
+        return redirect('idan_muteruz:documents')
+
+
+class DocumentDownloadView(LoginRequiredMixin, View):
+    """
+    Serve a document as a file download.
+
+    Ownership check: the document must belong to ``request.user``.  Any
+    attempt to download another user's document returns 404 (not 403) to
+    avoid confirming whether the document pk exists.
+
+    FileResponse with ``as_attachment=True`` sets Content-Disposition to
+    ``attachment``, which instructs the browser to download the file rather
+    than render it inline.  This prevents a malicious PDF with embedded
+    JavaScript from executing in the browser's PDF renderer.
+
+    Content-Type is set explicitly to ``application/pdf`` rather than
+    trusting the file extension, consistent with the upload-time validation.
+    """
+
+    login_url = reverse_lazy('idan_muteruz:login')
+
+    def get(self, request, pk, *args, **kwargs):
+        doc = get_object_or_404(UserDocument, pk=pk, owner=request.user)
+        try:
+            file_handle = doc.file.open('rb')
+        except (OSError, FileNotFoundError):
+            raise Http404('File not found on storage.')
+        return FileResponse(
+            file_handle,
+            as_attachment=True,
+            filename=doc.original_name,
+            content_type='application/pdf',
+        )
+
+
+class DocumentDeleteView(LoginRequiredMixin, View):
+    """
+    POST-only endpoint: delete a document.
+
+    Ownership check: same 404-on-mismatch pattern as DocumentDownloadView.
+    After removing the database row the file is deleted from storage so no
+    orphaned blobs remain.
+    """
+
+    login_url = reverse_lazy('idan_muteruz:login')
+    http_method_names = ['post']
+
+    def post(self, request, pk, *args, **kwargs):
+        doc = get_object_or_404(UserDocument, pk=pk, owner=request.user)
+        name = doc.original_name
+        doc.file.delete(save=False)   # remove from storage
+        doc.delete()                  # remove from database
+        messages.success(request, f'"{name}" deleted.')
+        return redirect('idan_muteruz:documents')

@@ -17,6 +17,13 @@ urlpatterns = [
     path('password/reset/sent/', views.UserPasswordResetSentView.as_view(), name='password_reset_sent'),
     path('password/reset/<uidb64>/<token>/', views.UserPasswordResetConfirmView.as_view(), name='password_reset_confirm'),
     path('password/reset/complete/', views.UserPasswordResetCompleteView.as_view(), name='password_reset_complete'),
+    # Avatar upload (POST)
+    path('profile/avatar/', views.AvatarUploadView.as_view(), name='avatar_upload'),
+    # Documents
+    path('documents/', views.DocumentListView.as_view(), name='documents'),
+    path('documents/upload/', views.DocumentUploadView.as_view(), name='document_upload'),
+    path('documents/<int:pk>/download/', views.DocumentDownloadView.as_view(), name='document_download'),
+    path('documents/<int:pk>/delete/', views.DocumentDeleteView.as_view(), name='document_delete'),
     # Privileged route — staff / instructors / admins only
     path('admin-panel/', views.AdminPanelView.as_view(), name='admin_panel'),
     # Role assignment — staff / superusers only (POST)

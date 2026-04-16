@@ -122,6 +122,21 @@ USE_TZ = True
 
 STATIC_URL = '/static/'
 
+# ── Media files (user uploads) ───────────────────────────────────────────────
+# MEDIA_ROOT: absolute filesystem path where uploaded files are stored.
+# MEDIA_URL:  URL prefix for serving media via Django's dev server.
+#             In production, serve media through nginx/S3; never expose the
+#             documents/ subdirectory via MEDIA_URL — documents are always
+#             served through access-controlled views (DocumentDownloadView).
+MEDIA_ROOT = BASE_DIR / 'media'
+MEDIA_URL = '/media/'
+
+# ── File upload size limits ───────────────────────────────────────────────────
+# These can be overridden per-environment via settings or in tests via
+# override_settings().
+AVATAR_MAX_UPLOAD_BYTES = int(os.environ.get('AVATAR_MAX_UPLOAD_BYTES', str(2 * 1024 * 1024)))    # 2 MB
+DOCUMENT_MAX_UPLOAD_BYTES = int(os.environ.get('DOCUMENT_MAX_UPLOAD_BYTES', str(5 * 1024 * 1024)))  # 5 MB
+
 LOGIN_REDIRECT_URL = '/dashboard/'
 LOGOUT_REDIRECT_URL = '/login/'
 LOGIN_URL = '/login/'

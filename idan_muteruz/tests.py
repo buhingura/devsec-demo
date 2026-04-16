@@ -1,16 +1,21 @@
+import io
+import os
+import shutil
+import tempfile
 from datetime import timedelta
 
 from django.contrib.auth import get_user_model
 from django.contrib.auth.models import Group, Permission
 from django.contrib.auth.tokens import default_token_generator
 from django.contrib.contenttypes.models import ContentType
+from django.core.files.uploadedfile import SimpleUploadedFile
 from django.test import Client, TestCase, override_settings
 from django.urls import reverse
 from django.utils import timezone
 from django.utils.encoding import force_bytes
 from django.utils.http import urlsafe_base64_encode
 
-from .models import LoginAttempt, Profile
+from .models import LoginAttempt, Profile, UserDocument
 
 User = get_user_model()
 
@@ -1923,3 +1928,340 @@ class StoredXSSTests(TestCase):
         # Django escapes & to &amp; and " to &quot; — the text must be in the page.
         self.assertIn('Research', content)
         self.assertIn('Development', content)
+
+
+# ---------------------------------------------------------------------------
+# Valid image and PDF bytes for upload tests
+# ---------------------------------------------------------------------------
+# Generate genuine image bytes using Pillow so that Pillow's own verify()
+# will accept them.  Hand-crafted byte sequences are brittle because Pillow's
+# decoder performs stricter validation than a simple magic-byte check.
+
+def _make_image_bytes(fmt: str) -> bytes:
+    """Return the raw bytes of a 1×1 red image in *fmt* (e.g. 'PNG', 'JPEG')."""
+    from PIL import Image
+    buf = io.BytesIO()
+    Image.new('RGB', (1, 1), color=(255, 0, 0)).save(buf, format=fmt)
+    return buf.getvalue()
+
+
+_VALID_PNG_BYTES  = _make_image_bytes('PNG')
+_VALID_JPEG_BYTES = _make_image_bytes('JPEG')
+
+# Minimal PDF with valid magic bytes
+_VALID_PDF_BYTES = b'%PDF-1.4\n1 0 obj\n<< /Type /Catalog >>\nendobj\n%%EOF\n'
+
+# One shared temp directory for the entire FileUploadTests suite.
+# Created at module import time; cleaned up in tearDownClass.
+_UPLOAD_TEST_MEDIA = tempfile.mkdtemp()
+
+
+@override_settings(MEDIA_ROOT=_UPLOAD_TEST_MEDIA)
+class FileUploadTests(TestCase):
+    """
+    Tests for avatar upload and private document upload/download/delete.
+
+    All tests run with MEDIA_ROOT pointing to a shared temporary directory
+    (_UPLOAD_TEST_MEDIA) so that uploaded files never pollute the source
+    tree.  The directory is removed in tearDownClass.
+    """
+
+    @classmethod
+    def tearDownClass(cls):
+        shutil.rmtree(_UPLOAD_TEST_MEDIA, ignore_errors=True)
+        super().tearDownClass()
+
+    def setUp(self):
+        self.user = User.objects.create_user(
+            username='uploader',
+            email='uploader@example.com',
+            password='UploadP@ss1',
+        )
+        self.other_user = User.objects.create_user(
+            username='other',
+            email='other@example.com',
+            password='OtherP@ss1',
+        )
+        self.client.force_login(self.user)
+
+    # ── Avatar upload ─────────────────────────────────────────────────────────
+
+    def test_valid_png_avatar_accepted(self):
+        """A genuine 1×1 PNG is accepted and the profile updated."""
+        f = SimpleUploadedFile('avatar.png', _VALID_PNG_BYTES, content_type='image/png')
+        response = self.client.post(
+            reverse('idan_muteruz:avatar_upload'),
+            {'avatar': f},
+        )
+        self.assertRedirects(response, reverse('idan_muteruz:profile'))
+        self.user.profile.refresh_from_db()
+        self.assertTrue(bool(self.user.profile.avatar))
+
+    def test_valid_jpeg_avatar_accepted(self):
+        """A genuine minimal JPEG is accepted."""
+        f = SimpleUploadedFile('avatar.jpg', _VALID_JPEG_BYTES, content_type='image/jpeg')
+        response = self.client.post(
+            reverse('idan_muteruz:avatar_upload'),
+            {'avatar': f},
+        )
+        self.assertRedirects(response, reverse('idan_muteruz:profile'))
+        self.user.profile.refresh_from_db()
+        self.assertTrue(bool(self.user.profile.avatar))
+
+    def test_exe_disguised_as_png_rejected(self):
+        """
+        A file with a .png extension but EXE magic bytes (MZ) is rejected
+        by Pillow's verify() and no file is saved.
+        """
+        exe_bytes = b'MZ' + b'\x00' * 100   # DOS/PE header magic
+        f = SimpleUploadedFile('malware.png', exe_bytes, content_type='image/png')
+        response = self.client.post(
+            reverse('idan_muteruz:avatar_upload'),
+            {'avatar': f},
+        )
+        self.assertRedirects(response, reverse('idan_muteruz:profile'))
+        self.user.profile.refresh_from_db()
+        self.assertFalse(bool(self.user.profile.avatar))
+
+    def test_php_script_disguised_as_png_rejected(self):
+        """A PHP script renamed to .png is rejected by content inspection."""
+        php_bytes = b'<?php system($_GET["cmd"]); ?>'
+        f = SimpleUploadedFile('shell.png', php_bytes, content_type='image/png')
+        self.client.post(
+            reverse('idan_muteruz:avatar_upload'),
+            {'avatar': f},
+        )
+        self.user.profile.refresh_from_db()
+        self.assertFalse(bool(self.user.profile.avatar))
+
+    def test_avatar_wrong_extension_rejected(self):
+        """A .exe extension is rejected at the extension-whitelist step."""
+        f = SimpleUploadedFile('bad.exe', b'MZ' + b'\x00' * 100, content_type='application/octet-stream')
+        self.client.post(
+            reverse('idan_muteruz:avatar_upload'),
+            {'avatar': f},
+        )
+        self.user.profile.refresh_from_db()
+        self.assertFalse(bool(self.user.profile.avatar))
+
+    @override_settings(AVATAR_MAX_UPLOAD_BYTES=10)
+    def test_avatar_over_size_limit_rejected(self):
+        """A file exceeding AVATAR_MAX_UPLOAD_BYTES is rejected before content is read."""
+        f = SimpleUploadedFile('big.png', b'X' * 20, content_type='image/png')
+        self.client.post(
+            reverse('idan_muteruz:avatar_upload'),
+            {'avatar': f},
+        )
+        self.user.profile.refresh_from_db()
+        self.assertFalse(bool(self.user.profile.avatar))
+
+    def test_avatar_upload_requires_login(self):
+        """Unauthenticated POST to avatar_upload redirects to login."""
+        self.client.logout()
+        f = SimpleUploadedFile('avatar.png', _VALID_PNG_BYTES, content_type='image/png')
+        response = self.client.post(
+            reverse('idan_muteruz:avatar_upload'),
+            {'avatar': f},
+        )
+        self.assertEqual(response.status_code, 302)
+        self.assertIn('/login/', response['Location'])
+
+    def test_avatar_scoped_to_own_profile(self):
+        """
+        Avatar upload always targets the logged-in user's profile — no URL
+        parameter exists that could be used to overwrite another user's avatar.
+        """
+        # Other user starts with no avatar.
+        self.assertFalse(bool(self.other_user.profile.avatar))
+        f = SimpleUploadedFile('avatar.png', _VALID_PNG_BYTES, content_type='image/png')
+        self.client.post(
+            reverse('idan_muteruz:avatar_upload'),
+            {'avatar': f},
+        )
+        # self.user got an avatar.
+        self.user.profile.refresh_from_db()
+        self.assertTrue(bool(self.user.profile.avatar))
+        # other_user's profile is untouched.
+        self.other_user.profile.refresh_from_db()
+        self.assertFalse(bool(self.other_user.profile.avatar))
+
+    # ── Document upload ───────────────────────────────────────────────────────
+
+    def test_valid_pdf_document_accepted(self):
+        """A valid PDF (correct magic bytes) is accepted and stored."""
+        f = SimpleUploadedFile('report.pdf', _VALID_PDF_BYTES, content_type='application/pdf')
+        response = self.client.post(
+            reverse('idan_muteruz:document_upload'),
+            {'file': f},
+        )
+        self.assertRedirects(response, reverse('idan_muteruz:documents'))
+        self.assertEqual(UserDocument.objects.filter(owner=self.user).count(), 1)
+
+    def test_exe_disguised_as_pdf_rejected(self):
+        """
+        A file with a .pdf extension but EXE magic bytes (MZ) is rejected
+        by the magic-byte check; the database row must not be created.
+        """
+        exe_bytes = b'MZ' + b'\x00' * 100
+        f = SimpleUploadedFile('payload.pdf', exe_bytes, content_type='application/pdf')
+        self.client.post(
+            reverse('idan_muteruz:document_upload'),
+            {'file': f},
+        )
+        self.assertEqual(UserDocument.objects.filter(owner=self.user).count(), 0)
+
+    def test_php_script_disguised_as_pdf_rejected(self):
+        """A PHP script renamed to .pdf is rejected by magic-byte check."""
+        php_bytes = b'<?php echo shell_exec($_GET["cmd"]); ?>'
+        f = SimpleUploadedFile('shell.pdf', php_bytes, content_type='application/pdf')
+        self.client.post(
+            reverse('idan_muteruz:document_upload'),
+            {'file': f},
+        )
+        self.assertEqual(UserDocument.objects.filter(owner=self.user).count(), 0)
+
+    def test_wrong_extension_document_rejected(self):
+        """A valid PDF with a .txt extension is rejected at the extension step."""
+        f = SimpleUploadedFile('notes.txt', _VALID_PDF_BYTES, content_type='text/plain')
+        self.client.post(
+            reverse('idan_muteruz:document_upload'),
+            {'file': f},
+        )
+        self.assertEqual(UserDocument.objects.filter(owner=self.user).count(), 0)
+
+    @override_settings(DOCUMENT_MAX_UPLOAD_BYTES=10)
+    def test_document_over_size_limit_rejected(self):
+        """A PDF exceeding DOCUMENT_MAX_UPLOAD_BYTES is rejected before magic-byte check."""
+        f = SimpleUploadedFile('big.pdf', _VALID_PDF_BYTES, content_type='application/pdf')
+        self.client.post(
+            reverse('idan_muteruz:document_upload'),
+            {'file': f},
+        )
+        self.assertEqual(UserDocument.objects.filter(owner=self.user).count(), 0)
+
+    def test_document_upload_requires_login(self):
+        """Unauthenticated POST to document_upload redirects to login."""
+        self.client.logout()
+        f = SimpleUploadedFile('report.pdf', _VALID_PDF_BYTES, content_type='application/pdf')
+        response = self.client.post(
+            reverse('idan_muteruz:document_upload'),
+            {'file': f},
+        )
+        self.assertEqual(response.status_code, 302)
+        self.assertIn('/login/', response['Location'])
+
+    def test_document_original_name_stored_as_basename(self):
+        """
+        Path-traversal payloads in the filename are reduced to basename only.
+        ``../../etc/passwd.pdf`` must be stored as ``passwd.pdf``.
+        """
+        traversal_name = '../../etc/passwd.pdf'
+        f = SimpleUploadedFile(traversal_name, _VALID_PDF_BYTES, content_type='application/pdf')
+        self.client.post(
+            reverse('idan_muteruz:document_upload'),
+            {'file': f},
+        )
+        doc = UserDocument.objects.filter(owner=self.user).first()
+        self.assertIsNotNone(doc)
+        self.assertEqual(doc.original_name, 'passwd.pdf')
+        # The storage path itself must never contain the traversal sequence.
+        self.assertNotIn('..', doc.file.name)
+
+    # ── Document download (access control) ───────────────────────────────────
+
+    def _upload_document(self, user, filename='report.pdf'):
+        """
+        Helper: create a UserDocument in the DB for *user*.
+
+        Uses a dedicated Client instance so that flash messages from this
+        upload do not leak into self.client's session (Django test clients
+        share nothing between instances).
+        """
+        f = SimpleUploadedFile(filename, _VALID_PDF_BYTES, content_type='application/pdf')
+        c = Client()
+        c.force_login(user)
+        c.post(
+            reverse('idan_muteruz:document_upload'),
+            {'file': f},
+        )
+        return UserDocument.objects.filter(owner=user).latest('uploaded_at')
+
+    def test_owner_can_download_own_document(self):
+        """The document owner receives a 200 FileResponse."""
+        doc = self._upload_document(self.user)
+        response = self.client.get(
+            reverse('idan_muteruz:document_download', kwargs={'pk': doc.pk})
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.get('Content-Disposition', ''),
+                         f'attachment; filename="report.pdf"')
+
+    def test_other_user_cannot_download_document(self):
+        """
+        Another authenticated user requesting a document they don't own
+        receives 404 — the view must not reveal whether the pk exists.
+        """
+        doc = self._upload_document(self.user)
+        self.client.force_login(self.other_user)
+        response = self.client.get(
+            reverse('idan_muteruz:document_download', kwargs={'pk': doc.pk})
+        )
+        self.assertEqual(response.status_code, 404)
+
+    def test_anonymous_user_cannot_download_document(self):
+        """Unauthenticated request to download redirects to login."""
+        doc = self._upload_document(self.user)
+        self.client.logout()
+        response = self.client.get(
+            reverse('idan_muteruz:document_download', kwargs={'pk': doc.pk})
+        )
+        self.assertEqual(response.status_code, 302)
+        self.assertIn('/login/', response['Location'])
+
+    # ── Document delete (access control) ─────────────────────────────────────
+
+    def test_owner_can_delete_own_document(self):
+        """Owner deletes a document; DB row and file are removed."""
+        doc = self._upload_document(self.user)
+        doc_pk = doc.pk
+        response = self.client.post(
+            reverse('idan_muteruz:document_delete', kwargs={'pk': doc_pk})
+        )
+        self.assertRedirects(response, reverse('idan_muteruz:documents'))
+        self.assertFalse(UserDocument.objects.filter(pk=doc_pk).exists())
+
+    def test_other_user_cannot_delete_document(self):
+        """Another user POSTing to delete an unowned document receives 404."""
+        doc = self._upload_document(self.user)
+        self.client.force_login(self.other_user)
+        response = self.client.post(
+            reverse('idan_muteruz:document_delete', kwargs={'pk': doc.pk})
+        )
+        self.assertEqual(response.status_code, 404)
+        # Document must still exist.
+        self.assertTrue(UserDocument.objects.filter(pk=doc.pk).exists())
+
+    # ── Document list ─────────────────────────────────────────────────────────
+
+    def test_document_list_requires_login(self):
+        """Unauthenticated GET to document list redirects to login."""
+        self.client.logout()
+        response = self.client.get(reverse('idan_muteruz:documents'))
+        self.assertEqual(response.status_code, 302)
+        self.assertIn('/login/', response['Location'])
+
+    def test_document_list_shows_only_own_documents(self):
+        """
+        The document list page shows only the logged-in user's documents,
+        not documents belonging to other users.
+        """
+        # Upload one document for self.user and one for self.other_user.
+        self._upload_document(self.user, 'mine.pdf')
+        self._upload_document(self.other_user, 'theirs.pdf')
+
+        self.client.force_login(self.user)
+        response = self.client.get(reverse('idan_muteruz:documents'))
+        self.assertEqual(response.status_code, 200)
+        content = response.content.decode()
+        self.assertIn('mine.pdf', content)
+        self.assertNotIn('theirs.pdf', content)

@@ -3,7 +3,8 @@ from django.contrib.auth import get_user_model
 from django.contrib.auth.forms import PasswordChangeForm, UserCreationForm
 from django.utils.html import strip_tags
 
-from .models import Profile
+from .models import Profile, UserDocument
+from .upload_validators import validate_avatar, validate_document
 
 
 def validate_no_html(value: str) -> None:
@@ -119,6 +120,34 @@ class ProfileForm(forms.ModelForm):
 
 class CustomPasswordChangeForm(PasswordChangeForm):
     pass
+
+
+class AvatarUploadForm(forms.ModelForm):
+    """Form for updating the user's profile avatar."""
+
+    class Meta:
+        model = Profile
+        fields = ['avatar']
+
+    def clean_avatar(self):
+        avatar = self.cleaned_data.get('avatar')
+        if avatar:
+            validate_avatar(avatar)
+        return avatar
+
+
+class DocumentUploadForm(forms.ModelForm):
+    """Form for uploading a new private document."""
+
+    class Meta:
+        model = UserDocument
+        fields = ['file']
+
+    def clean_file(self):
+        uploaded = self.cleaned_data.get('file')
+        if uploaded:
+            validate_document(uploaded)
+        return uploaded
 
 
 class AssignRoleForm(forms.Form):
