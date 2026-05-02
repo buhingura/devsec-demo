@@ -24,8 +24,5 @@ urlpatterns = [
     path('', include('idan_muteruz.urls', namespace='idan_muteruz')),
 ]
 
-# Serve avatars via MEDIA_URL during development.
-# Documents are intentionally NOT served here — they are only accessible
-# through the access-controlled DocumentDownloadView.
 if settings.DEBUG:
     urlpatterns += static(settings.MEDIA_URL, document_root=settings.MEDIA_ROOT)
