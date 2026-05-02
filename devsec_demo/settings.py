@@ -213,6 +213,7 @@ EMAIL_BACKEND   = os.environ.get(
 DEFAULT_FROM_EMAIL = os.environ.get('DEFAULT_FROM_EMAIL', 'noreply@localhost')
 
 
+
 # ===========================================================================
 # 10. AUTHENTICATION REDIRECTS
 # ===========================================================================
@@ -225,31 +226,6 @@ LOGOUT_REDIRECT_URL = '/login/'
 # ===========================================================================
 # 11. COOKIE & SESSION SECURITY
 # ===========================================================================
-# SESSION_COOKIE_SECURE / CSRF_COOKIE_SECURE
-#   Instructs the browser to send the cookie ONLY over HTTPS connections.
-#   Must be True in production; setting it in a plain-HTTP dev environment
-#   prevents the browser from sending the cookie at all, breaking logins.
-#   Controlled by DJANGO_COOKIE_SECURE (default: mirrors SECURE_SSL_REDIRECT).
-#
-# SESSION_COOKIE_HTTPONLY
-#   Prevents JavaScript (including injected scripts) from reading the session
-#   cookie.  There is almost never a legitimate reason to access session data
-#   from client-side JS, so this is always True.
-#
-# CSRF_COOKIE_HTTPONLY
-#   Makes the CSRF cookie unreadable by JS.  Django's own JS CSRF helper reads
-#   the token from a <meta> tag or a form field instead, so setting this True
-#   is safe and hardens against XSS-based token theft.
-#
-# SESSION_COOKIE_SAMESITE / CSRF_COOKIE_SAMESITE = 'Lax'
-#   'Lax' allows the cookie to be sent on top-level navigations (clicking a
-#   link) but blocks cross-site requests originating from third-party iframes
-#   or fetch() calls.  'Strict' would break OAuth/SAML redirect flows.
-#   'Lax' is the modern browser default and a good baseline.
-#
-# SESSION_COOKIE_AGE
-#   30 minutes of inactivity before the session expires.  Adjust to match
-#   your application's session lifetime requirements.
 
 _cookie_secure = os.environ.get('DJANGO_COOKIE_SECURE', 'false').strip().lower() in {
     '1', 'true', 'yes',
@@ -264,9 +240,6 @@ CSRF_COOKIE_SECURE      = _cookie_secure
 CSRF_COOKIE_HTTPONLY    = True
 CSRF_COOKIE_SAMESITE    = 'Lax'
 
-# Trusted origins for cross-origin unsafe requests (Django 4.0+).
-# Required when CSRF_COOKIE_SECURE=True and the app is accessed via HTTPS.
-# Value: comma-separated "https://origin" strings.
 _csrf_origins = os.environ.get('DJANGO_CSRF_TRUSTED_ORIGINS', '')
 CSRF_TRUSTED_ORIGINS = [o.strip() for o in _csrf_origins.split(',') if o.strip()]
 
@@ -274,36 +247,6 @@ CSRF_TRUSTED_ORIGINS = [o.strip() for o in _csrf_origins.split(',') if o.strip()
 # ===========================================================================
 # 12. TRANSPORT SECURITY (HTTPS / HSTS)
 # ===========================================================================
-# SECURE_SSL_REDIRECT
-#   Redirects all plain-HTTP requests to HTTPS.  Enable once the server has
-#   a valid TLS certificate.  If terminating TLS at a load balancer or proxy,
-#   leave this False and let the proxy handle the redirect instead
-#   (otherwise Django never sees the plain-HTTP request to redirect).
-#
-# SECURE_PROXY_SSL_HEADER
-#   When TLS is terminated upstream (nginx, AWS ALB, Heroku, etc.) the
-#   request arrives at Django over plain HTTP.  This setting tells Django to
-#   trust the X-Forwarded-Proto header set by the proxy so that
-#   request.is_secure() returns True and CSRF/cookie checks work correctly.
-#   ONLY enable this if your proxy is configured to set the header and
-#   strips it from untrusted client requests — otherwise an attacker can
-#   spoof it.
-#
-# SECURE_HSTS_SECONDS
-#   Instructs browsers to refuse plain-HTTP connections to this domain for
-#   the specified number of seconds.  Start at 300 (5 min) to test, then
-#   raise to 31536000 (1 year) once you are confident HTTPS is stable.
-#   WARNING: once browsers cache an HSTS policy, you cannot easily revert to
-#   HTTP — ensure TLS is fully working before raising this above zero.
-#
-# SECURE_HSTS_INCLUDE_SUBDOMAINS
-#   Extends the HSTS policy to every subdomain.  Enable only when ALL
-#   subdomains are served over HTTPS.
-#
-# SECURE_HSTS_PRELOAD
-#   Opts the domain into browser HSTS preload lists.  This is permanent and
-#   very hard to undo.  Only set True after the HSTS policy has been stable
-#   for at least one year and you have submitted the domain to hstspreload.org.
 
 SECURE_SSL_REDIRECT = os.environ.get('SECURE_SSL_REDIRECT', 'false').strip().lower() in {
     '1', 'true', 'yes',
@@ -327,27 +270,6 @@ SECURE_HSTS_PRELOAD            = os.environ.get(
 # ===========================================================================
 # 13. ADDITIONAL SECURITY HEADERS
 # ===========================================================================
-# SECURE_CONTENT_TYPE_NOSNIFF
-#   Sends "X-Content-Type-Options: nosniff", preventing browsers from
-#   MIME-sniffing a response away from the declared Content-Type.  This
-#   blocks attacks where a script is uploaded as "text/plain" but executed
-#   as JavaScript.
-#
-# SECURE_BROWSER_XSS_FILTER  (Django 3.0+ no-op, kept for older proxies)
-#   Sets "X-XSS-Protection: 1; mode=block".  Modern browsers ignore this
-#   header (Chrome removed the XSS auditor), but it does no harm and may
-#   still be checked by security scanners.
-#
-# X_FRAME_OPTIONS
-#   Sends "X-Frame-Options: DENY", blocking the app from being loaded in any
-#   <iframe> — the primary defence against clickjacking attacks.
-#   Use 'SAMEORIGIN' if you need same-origin framing (e.g. an embedded chart).
-#
-# SECURE_REFERRER_POLICY
-#   Controls how much of the referring URL is sent with outbound requests.
-#   'strict-origin-when-cross-origin' sends the full URL for same-origin
-#   requests and only the origin for cross-origin ones, hiding path and query
-#   parameters (which may contain tokens or PII) from third parties.
 
 SECURE_CONTENT_TYPE_NOSNIFF = True
 SECURE_BROWSER_XSS_FILTER   = True
@@ -358,12 +280,10 @@ SECURE_REFERRER_POLICY       = 'strict-origin-when-cross-origin'
 # ===========================================================================
 # 14. BRUTE-FORCE / LOGIN THROTTLING
 # ===========================================================================
-# These are read by UserLoginView.  Safe defaults; override per-environment.
 
 LOGIN_MAX_ATTEMPTS    = int(os.environ.get('LOGIN_MAX_ATTEMPTS', '5'))
 LOGIN_LOCKOUT_SECONDS = int(os.environ.get('LOGIN_LOCKOUT_SECONDS', '900'))
 
-# Password reset token validity window (seconds).
 PASSWORD_RESET_TIMEOUT = int(os.environ.get('PASSWORD_RESET_TIMEOUT', '3600'))
 
 
@@ -378,19 +298,12 @@ DOCUMENT_MAX_UPLOAD_BYTES = int(os.environ.get('DOCUMENT_MAX_UPLOAD_BYTES', str(
 # ===========================================================================
 # 16. AUDIT LOGGING
 # ===========================================================================
-# The idan_muteruz.audit logger writes one structured line per security event
-# (login, logout, register, password change, role assignment, …) to the
-# audit stream.  Never log passwords, tokens, or session IDs.
-#
-# In production, replace the StreamHandler with a file handler or a
-# centralised log aggregator (e.g. Splunk, Datadog, CloudWatch).
 
 LOGGING = {
     'version': 1,
     'disable_existing_loggers': False,
     'formatters': {
         'audit': {
-            # ISO-8601 timestamp makes records easy to sort, parse, and ingest.
             'format':  '%(asctime)s %(levelname)s [audit] %(message)s',
             'datefmt': '%Y-%m-%dT%H:%M:%SZ',
         },
@@ -411,13 +324,11 @@ LOGGING = {
         },
     },
     'loggers': {
-        # Security-event stream — keep separate from general app logs.
         'idan_muteruz.audit': {
             'handlers':  ['audit_console'],
             'level':     'INFO',
-            'propagate': False,   # audit records must not appear in the root logger
+            'propagate': False,
         },
-        # General Django warnings (e.g. deprecated APIs, missing indexes).
         'django': {
             'handlers':  ['console'],
             'level':     'WARNING',

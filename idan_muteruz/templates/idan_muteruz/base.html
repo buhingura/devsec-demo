@@ -1,0 +1,526 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{% block title %}dan{% endblock %} — dan</title>
+    <style>
+        *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+        :root {
+            --primary:       #4F46E5;
+            --primary-dark:  #4338CA;
+            --primary-light: #EEF2FF;
+            --bg:            #F3F4F6;
+            --card:          #FFFFFF;
+            --text:          #111827;
+            --muted:         #6B7280;
+            --border:        #E5E7EB;
+            --success-bg:    #ECFDF5;
+            --success-bdr:   #A7F3D0;
+            --success-text:  #065F46;
+            --error-bg:      #FEF2F2;
+            --error-bdr:     #FECACA;
+            --error-text:    #991B1B;
+            --sidebar-bg:    #1E1B4B;
+            --sidebar-hover: rgba(255,255,255,.07);
+            --sidebar-active:#4F46E5;
+            --sidebar-text:  #C7D2FE;
+            --sidebar-muted: #6366F1;
+            --radius:        10px;
+            --shadow:        0 1px 3px rgba(0,0,0,.08), 0 1px 2px rgba(0,0,0,.05);
+            --shadow-md:     0 4px 16px rgba(0,0,0,.08);
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            font-size: 15px;
+            color: var(--text);
+            background: var(--bg);
+            line-height: 1.6;
+        }
+
+        /* ── Auth Layout ─────────────────────────────────── */
+        .auth-wrap {
+            min-height: 100vh;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 2rem;
+            background: linear-gradient(135deg, #EEF2FF 0%, #E0E7FF 55%, #F3F4F6 100%);
+        }
+
+        .auth-card {
+            width: 100%;
+            max-width: 440px;
+            background: var(--card);
+            border-radius: 16px;
+            box-shadow: 0 20px 60px rgba(79,70,229,.18), 0 4px 20px rgba(0,0,0,.08);
+            overflow: hidden;
+        }
+
+        .auth-card-head {
+            background: linear-gradient(135deg, #4F46E5 0%, #7C3AED 100%);
+            padding: 1.75rem 2rem;
+            color: white;
+        }
+
+        .auth-brand {
+            font-size: 1.4rem;
+            font-weight: 800;
+            letter-spacing: -0.5px;
+        }
+
+        .auth-brand span { opacity: .7; }
+
+        .auth-brand-sub {
+            font-size: .8rem;
+            opacity: .75;
+            margin-top: .15rem;
+        }
+
+        .auth-card-body { padding: 2rem; }
+
+        .auth-card-body h1 {
+            font-size: 1.25rem;
+            font-weight: 700;
+            margin-bottom: .2rem;
+        }
+
+        .auth-subtitle {
+            color: var(--muted);
+            font-size: .875rem;
+            margin-bottom: 1.6rem;
+        }
+
+        .auth-foot {
+            padding: .9rem 2rem;
+            text-align: center;
+            border-top: 1px solid var(--border);
+            background: #FAFAFA;
+            font-size: .85rem;
+            color: var(--muted);
+        }
+
+        .auth-foot a {
+            color: var(--primary);
+            font-weight: 600;
+            text-decoration: none;
+        }
+
+        .auth-foot a:hover { text-decoration: underline; }
+
+        /* ── App Layout ──────────────────────────────────── */
+        .app-wrap { display: flex; min-height: 100vh; }
+
+        /* Sidebar */
+        .sidebar {
+            width: 235px;
+            background: var(--sidebar-bg);
+            display: flex;
+            flex-direction: column;
+            position: fixed;
+            top: 0; left: 0;
+            height: 100vh;
+            z-index: 100;
+        }
+
+        .sidebar-brand {
+            padding: 1.4rem 1.25rem;
+            border-bottom: 1px solid rgba(255,255,255,.07);
+        }
+
+        .sidebar-brand-name {
+            font-size: 1.1rem;
+            font-weight: 800;
+            color: white;
+            letter-spacing: -.4px;
+        }
+
+        .sidebar-brand-sub {
+            font-size: .72rem;
+            color: var(--sidebar-muted);
+            margin-top: .1rem;
+        }
+
+        .sidebar-nav { flex: 1; padding: .75rem; overflow-y: auto; }
+
+        .sidebar-section {
+            font-size: .68rem;
+            font-weight: 700;
+            text-transform: uppercase;
+            letter-spacing: .09em;
+            color: var(--sidebar-muted);
+            padding: .6rem .75rem .2rem;
+            margin-top: .3rem;
+        }
+
+        .sidebar-link {
+            display: flex;
+            align-items: center;
+            gap: .7rem;
+            padding: .6rem .75rem;
+            border-radius: 8px;
+            color: var(--sidebar-text);
+            text-decoration: none;
+            font-size: .875rem;
+            font-weight: 500;
+            transition: background .15s, color .15s;
+            margin-bottom: 2px;
+        }
+
+        .sidebar-link:hover { background: var(--sidebar-hover); color: white; }
+        .sidebar-link.active { background: var(--sidebar-active); color: white; }
+
+        .sidebar-link svg { width: 17px; height: 17px; flex-shrink: 0; }
+
+        .sidebar-user {
+            padding: 1rem 1.25rem;
+            border-top: 1px solid rgba(255,255,255,.07);
+            display: flex;
+            align-items: center;
+            gap: .7rem;
+        }
+
+        .sidebar-avatar {
+            width: 34px;
+            height: 34px;
+            background: var(--primary);
+            border-radius: 50%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-weight: 700;
+            font-size: .85rem;
+            color: white;
+            flex-shrink: 0;
+        }
+
+        .sidebar-uname {
+            font-size: .83rem;
+            font-weight: 600;
+            color: white;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+
+        .sidebar-urole { font-size: .71rem; color: var(--sidebar-muted); }
+
+        /* Main */
+        .main { margin-left: 235px; flex: 1; display: flex; flex-direction: column; min-height: 100vh; }
+
+        .topbar {
+            background: var(--card);
+            border-bottom: 1px solid var(--border);
+            padding: 0 2rem;
+            height: 58px;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            position: sticky;
+            top: 0;
+            z-index: 50;
+            box-shadow: var(--shadow);
+        }
+
+        .topbar-title { font-size: .95rem; font-weight: 600; }
+
+        .page-body { padding: 2rem; flex: 1; }
+
+        /* ── Flash messages ──────────────────────────────── */
+        .messages { margin-bottom: 1.25rem; }
+
+        .alert {
+            padding: .8rem 1rem;
+            border-radius: 8px;
+            margin-bottom: .5rem;
+            font-size: .875rem;
+            border: 1px solid transparent;
+        }
+
+        .alert.success { background: var(--success-bg); border-color: var(--success-bdr); color: var(--success-text); }
+        .alert.error   { background: var(--error-bg);   border-color: var(--error-bdr);   color: var(--error-text); }
+
+        /* ── Cards ───────────────────────────────────────── */
+        .card {
+            background: var(--card);
+            border: 1px solid var(--border);
+            border-radius: var(--radius);
+            box-shadow: var(--shadow);
+        }
+
+        .card-head {
+            padding: 1.1rem 1.5rem;
+            border-bottom: 1px solid var(--border);
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+        }
+
+        .card-title { font-size: .95rem; font-weight: 700; }
+        .card-sub   { font-size: .78rem; color: var(--muted); margin-top: .1rem; }
+        .card-body  { padding: 1.5rem; }
+
+        /* ── Forms ───────────────────────────────────────── */
+        .fgroup { margin-bottom: 1rem; }
+
+        .fgroup label {
+            display: block;
+            font-size: .82rem;
+            font-weight: 600;
+            color: #374151;
+            margin-bottom: .3rem;
+        }
+
+        .fgroup input,
+        .fgroup textarea,
+        .fgroup select {
+            width: 100%;
+            padding: .62rem .875rem;
+            border: 1.5px solid var(--border);
+            border-radius: 8px;
+            font-size: .9rem;
+            color: var(--text);
+            background: white;
+            transition: border-color .15s, box-shadow .15s;
+            outline: none;
+            font-family: inherit;
+        }
+
+        .fgroup input:focus,
+        .fgroup textarea:focus,
+        .fgroup select:focus {
+            border-color: var(--primary);
+            box-shadow: 0 0 0 3px rgba(79,70,229,.12);
+        }
+
+        .fgroup textarea { resize: vertical; min-height: 90px; }
+
+        .fhelp  { font-size: .75rem; color: var(--muted); margin-top: .25rem; }
+        .ferror { font-size: .78rem; color: #DC2626; margin-top: .25rem; }
+
+        .ferrors-box {
+            background: var(--error-bg);
+            border: 1px solid var(--error-bdr);
+            border-radius: 8px;
+            padding: .75rem 1rem;
+            color: var(--error-text);
+            font-size: .875rem;
+            margin-bottom: 1.1rem;
+        }
+
+        /* ── Buttons ─────────────────────────────────────── */
+        .btn {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            gap: .45rem;
+            padding: .62rem 1.2rem;
+            border-radius: 8px;
+            font-size: .875rem;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all .15s;
+            text-decoration: none;
+            border: none;
+            font-family: inherit;
+            line-height: 1.4;
+        }
+
+        .btn-primary { background: var(--primary); color: white; }
+        .btn-primary:hover {
+            background: var(--primary-dark);
+            transform: translateY(-1px);
+            box-shadow: 0 4px 14px rgba(79,70,229,.35);
+        }
+
+        .btn-secondary { background: white; color: var(--text); border: 1.5px solid var(--border); }
+        .btn-secondary:hover { background: var(--bg); }
+
+        .btn-ghost { background: transparent; color: var(--muted); }
+        .btn-ghost:hover { background: var(--bg); color: var(--text); }
+
+        .btn-full { width: 100%; }
+        .btn-sm   { padding: .42rem .8rem; font-size: .8rem; }
+
+        /* ── Stat cards ──────────────────────────────────── */
+        .stat-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(175px, 1fr)); gap: 1rem; margin-bottom: 1.5rem; }
+
+        .stat-card {
+            background: var(--card);
+            border: 1px solid var(--border);
+            border-radius: var(--radius);
+            padding: 1.2rem 1.4rem;
+            box-shadow: var(--shadow);
+        }
+
+        .stat-icon {
+            width: 38px;
+            height: 38px;
+            border-radius: 9px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            margin-bottom: .75rem;
+        }
+
+        .stat-icon svg { width: 20px; height: 20px; }
+        .stat-icon.indigo { background: #EEF2FF; color: var(--primary); }
+        .stat-icon.green  { background: #ECFDF5; color: #059669; }
+        .stat-icon.amber  { background: #FFFBEB; color: #D97706; }
+        .stat-icon.rose   { background: #FFF1F2; color: #E11D48; }
+
+        .stat-label { font-size: .72rem; font-weight: 600; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); }
+        .stat-value { font-size: 1.3rem; font-weight: 700; color: var(--text); margin-top: .15rem; }
+        .stat-sub   { font-size: .75rem; color: var(--muted); margin-top: .1rem; }
+
+        /* ── Page header ─────────────────────────────────── */
+        .page-hdr { margin-bottom: 1.5rem; }
+        .page-hdr h1 { font-size: 1.45rem; font-weight: 700; letter-spacing: -.3px; }
+        .page-hdr p  { color: var(--muted); margin-top: .2rem; font-size: .875rem; }
+
+        /* ── Grid helpers ────────────────────────────────── */
+        .grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; }
+        .grid-col-2 { display: grid; grid-template-columns: 2fr 1fr; gap: 1.5rem; align-items: start; }
+
+        /* ── Info row ────────────────────────────────────── */
+        .info-row {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: .65rem 0;
+            border-bottom: 1px solid var(--border);
+            font-size: .875rem;
+        }
+
+        .info-row:last-child { border-bottom: none; }
+        .info-label { color: var(--muted); font-weight: 500; }
+        .info-value { font-weight: 600; }
+
+        /* ── Badge ───────────────────────────────────────── */
+        .badge {
+            display: inline-flex;
+            align-items: center;
+            padding: .18rem .55rem;
+            border-radius: 999px;
+            font-size: .72rem;
+            font-weight: 600;
+        }
+
+        .badge-green { background: #ECFDF5; color: #065F46; }
+        .badge-indigo { background: #EEF2FF; color: #4338CA; }
+
+        /* ── Divider ─────────────────────────────────────── */
+        hr.divider { border: none; border-top: 1px solid var(--border); margin: 1.25rem 0; }
+
+        /* ── Responsive ──────────────────────────────────── */
+        @media (max-width: 768px) {
+            .sidebar { transform: translateX(-100%); }
+            .main { margin-left: 0; }
+            .grid-2, .grid-col-2 { grid-template-columns: 1fr; }
+        }
+    </style>
+</head>
+<body>
+
+{% if user.is_authenticated %}
+
+<div class="app-wrap">
+    <!-- ── Sidebar ── -->
+    <aside class="sidebar">
+        <div class="sidebar-brand">
+            <div class="sidebar-brand-name">DAN</div>
+            <div class="sidebar-brand-sub">Security Dashboard</div>
+        </div>
+
+        <nav class="sidebar-nav">
+            <div class="sidebar-section">Main</div>
+            <a href="{% url 'idan_muteruz:dashboard' %}" class="sidebar-link {% block nav_dash %}{% endblock %}">
+                <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.8" stroke="currentColor">
+                    <path stroke-linecap="round" stroke-linejoin="round" d="M3.75 6A2.25 2.25 0 016 3.75h2.25A2.25 2.25 0 0110.5 6v2.25a2.25 2.25 0 01-2.25 2.25H6a2.25 2.25 0 01-2.25-2.25V6zM3.75 15.75A2.25 2.25 0 016 13.5h2.25a2.25 2.25 0 012.25 2.25V18a2.25 2.25 0 01-2.25 2.25H6A2.25 2.25 0 013.75 18v-2.25zM13.5 6a2.25 2.25 0 012.25-2.25H18A2.25 2.25 0 0120.25 6v2.25A2.25 2.25 0 0118 10.5h-2.25a2.25 2.25 0 01-2.25-2.25V6zM13.5 15.75a2.25 2.25 0 012.25-2.25H18a2.25 2.25 0 012.25 2.25V18A2.25 2.25 0 0118 20.25h-2.25A2.25 2.25 0 0113.5 18v-2.25z"/>
+                </svg>
+                Dashboard
+            </a>
+
+            <div class="sidebar-section">Account</div>
+            <a href="{% url 'idan_muteruz:profile' %}" class="sidebar-link {% block nav_profile %}{% endblock %}">
+                <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.8" stroke="currentColor">
+                    <path stroke-linecap="round" stroke-linejoin="round" d="M15.75 6a3.75 3.75 0 11-7.5 0 3.75 3.75 0 017.5 0zM4.501 20.118a7.5 7.5 0 0114.998 0A17.933 17.933 0 0112 21.75c-2.676 0-5.216-.584-7.499-1.632z"/>
+                </svg>
+                Profile
+            </a>
+            <a href="{% url 'idan_muteruz:password_change' %}" class="sidebar-link {% block nav_security %}{% endblock %}">
+                <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.8" stroke="currentColor">
+                    <path stroke-linecap="round" stroke-linejoin="round" d="M16.5 10.5V6.75a4.5 4.5 0 10-9 0v3.75m-.75 11.25h10.5a2.25 2.25 0 002.25-2.25v-6.75a2.25 2.25 0 00-2.25-2.25H6.75a2.25 2.25 0 00-2.25 2.25v6.75a2.25 2.25 0 002.25 2.25z"/>
+                </svg>
+                Security
+            </a>
+
+            {% if user.is_staff or user.is_superuser or perms.idan_muteruz.can_access_admin_panel %}
+            <div class="sidebar-section">Administration</div>
+            <a href="{% url 'idan_muteruz:admin_panel' %}" class="sidebar-link {% block nav_admin %}{% endblock %}">
+                <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.8" stroke="currentColor">
+                    <path stroke-linecap="round" stroke-linejoin="round" d="M9 12.75L11.25 15 15 9.75m-3-7.036A11.959 11.959 0 013.598 6 11.99 11.99 0 003 9.749c0 5.592 3.824 10.29 9 11.623 5.176-1.332 9-6.03 9-11.622 0-1.31-.21-2.571-.598-3.751h-.152c-3.196 0-6.1-1.248-8.25-3.285z"/>
+                </svg>
+                Admin Panel
+            </a>
+            {% endif %}
+        </nav>
+
+        <div class="sidebar-user">
+            <div class="sidebar-avatar">{{ user.username.0|upper }}</div>
+            <div style="flex:1; min-width:0;">
+                <div class="sidebar-uname">{{ user.username }}</div>
+                <div class="sidebar-urole">
+                    {% if user.is_superuser %}Superuser
+                    {% elif user.is_staff %}Staff
+                    {% elif perms.idan_muteruz.can_access_admin_panel %}Instructor
+                    {% else %}Student{% endif %}
+                </div>
+            </div>
+        </div>
+    </aside>
+
+    <!-- ── Main ── -->
+    <div class="main">
+        <header class="topbar">
+            <span class="topbar-title">{% block topbar_title %}{% endblock %}</span>
+            <form method="post" action="{% url 'idan_muteruz:logout' %}">
+                {% csrf_token %}
+                <button type="submit" class="btn btn-secondary btn-sm">Sign out</button>
+            </form>
+        </header>
+
+        <div class="page-body">
+            {% if messages %}
+                <div class="messages">
+                    {% for message in messages %}
+                        <div class="alert {{ message.tags }}">{{ message }}</div>
+                    {% endfor %}
+                </div>
+            {% endif %}
+
+            {% block content %}{% endblock %}
+        </div>
+    </div>
+</div>
+
+{% else %}
+
+<div class="auth-wrap">
+    {% if messages %}
+        <div style="position:fixed;top:1rem;right:1rem;z-index:999;width:300px;">
+            {% for message in messages %}
+                <div class="alert {{ message.tags }}">{{ message }}</div>
+            {% endfor %}
+        </div>
+    {% endif %}
+
+    {% block auth_card %}{% endblock %}
+</div>
+
+{% endif %}
+
+</body>
+</html>
