@@ -1,0 +1,205 @@
+{% extends 'idan_muteruz/base.html' %}
+
+{% block title %}Admin Panel{% endblock %}
+{% block topbar_title %}Admin Panel{% endblock %}
+{% block nav_admin %}active{% endblock %}
+
+{% block content %}
+<style>
+    .role-select {
+        padding: .38rem .7rem;
+        border: 1.5px solid var(--border);
+        border-radius: 7px;
+        font-size: .82rem;
+        font-family: inherit;
+        color: var(--text);
+        background: white;
+        outline: none;
+        cursor: pointer;
+        transition: border-color .15s;
+    }
+    .role-select:focus { border-color: var(--primary); box-shadow: 0 0 0 3px rgba(79,70,229,.12); }
+
+    .um-table th, .um-table td {
+        padding: .65rem 1.25rem;
+        text-align: left;
+        border-bottom: 1px solid var(--border);
+    }
+    .um-table thead th {
+        font-size: .72rem;
+        font-weight: 700;
+        color: var(--muted);
+        text-transform: uppercase;
+        letter-spacing: .05em;
+        background: #FAFAFA;
+    }
+    .um-table tbody tr:last-child td { border-bottom: none; }
+    .um-table tbody tr:hover td { background: #FAFAFA; }
+</style>
+
+<div class="page-hdr">
+    <h1>Admin Panel</h1>
+    <p>User management and role overview. Visible to staff, instructors, and admins only.</p>
+</div>
+
+<!-- Access badge -->
+<div style="margin-bottom:1.5rem;">
+    {% if user.is_superuser %}
+        <span class="badge badge-indigo" style="font-size:.8rem; padding:.3rem .8rem;">Superuser access</span>
+    {% elif user.is_staff %}
+        <span class="badge badge-indigo" style="font-size:.8rem; padding:.3rem .8rem;">Staff access</span>
+    {% else %}
+        <span class="badge badge-green" style="font-size:.8rem; padding:.3rem .8rem;">Instructor access (via permission)</span>
+    {% endif %}
+</div>
+
+<!-- ── User Management (staff / superuser only) ──────────────────────── -->
+{% if user.is_staff or user.is_superuser %}
+<div class="card" style="margin-bottom:2rem;">
+    <div class="card-head">
+        <div>
+            <div class="card-title">User Management</div>
+            <div class="card-sub">Assign roles to users. Changes take effect immediately.</div>
+        </div>
+    </div>
+    <div class="card-body" style="padding:0;">
+        {% if user_rows %}
+        <table class="um-table" style="width:100%; border-collapse:collapse; font-size:.875rem;">
+            <thead>
+                <tr>
+                    <th>User</th>
+                    <th>Email</th>
+                    <th>Current role</th>
+                    <th>Assign role</th>
+                    <th></th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for row in user_rows %}
+                <tr>
+                    <td>
+                        <div style="font-weight:600;">{{ row.user.username }}</div>
+                        <div style="font-size:.75rem; color:var(--muted);">{{ row.user.get_full_name }}</div>
+                    </td>
+                    <td style="color:var(--muted);">{{ row.user.email|default:"—" }}</td>
+                    <td>
+                        {% if row.user.is_superuser %}
+                            <span class="badge badge-indigo">Superuser</span>
+                        {% elif row.user.is_staff %}
+                            <span class="badge badge-indigo">Staff</span>
+                        {% elif row.current_group %}
+                            <span class="badge badge-green">{{ row.current_group.name|capfirst }}</span>
+                        {% else %}
+                            <span style="color:var(--muted); font-size:.8rem;">No group</span>
+                        {% endif %}
+                    </td>
+                    <td>
+                        {% if row.user.is_superuser %}
+                            <span style="font-size:.8rem; color:var(--muted);">Manage via Django admin</span>
+                        {% else %}
+                        <form method="post"
+                              action="{% url 'idan_muteruz:assign_role' row.user.pk %}"
+                              style="display:flex; gap:.5rem; align-items:center;">
+                            {% csrf_token %}
+                            {{ row.form.group }}
+                            <button type="submit" class="btn btn-primary btn-sm">Save</button>
+                        </form>
+                        {% endif %}
+                    </td>
+                    <td>
+                        {% if row.user.is_active %}
+                            <span class="badge badge-green">Active</span>
+                        {% else %}
+                            <span class="badge" style="background:#FEF2F2;color:#991B1B;">Inactive</span>
+                        {% endif %}
+                    </td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+        {% else %}
+        <div style="padding:1.5rem; color:var(--muted); font-size:.875rem;">No users found.</div>
+        {% endif %}
+    </div>
+</div>
+{% endif %}
+
+<!-- ── Group summary stat cards ──────────────────────────────────────── -->
+<div class="stat-grid" style="margin-bottom:2rem;">
+    {% for entry in groups %}
+    <div class="stat-card">
+        <div class="stat-icon {% cycle 'indigo' 'green' 'amber' %}">
+            <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.8" stroke="currentColor">
+                <path stroke-linecap="round" stroke-linejoin="round" d="M18 18.72a9.094 9.094 0 003.741-.479 3 3 0 00-4.682-2.72m.94 3.198l.001.031c0 .225-.012.447-.037.666A11.944 11.944 0 0112 21c-2.17 0-4.207-.576-5.963-1.584A6.062 6.062 0 016 18.719m12 0a5.971 5.971 0 00-.941-3.197m0 0A5.995 5.995 0 0012 12.75a5.995 5.995 0 00-5.058 2.772m0 0a3 3 0 00-4.681 2.72 8.986 8.986 0 003.74.477m.94-3.197a5.971 5.971 0 00-.94 3.197M15 6.75a3 3 0 11-6 0 3 3 0 016 0zm6 3a2.25 2.25 0 11-4.5 0 2.25 2.25 0 014.5 0zm-13.5 0a2.25 2.25 0 11-4.5 0 2.25 2.25 0 014.5 0z"/>
+            </svg>
+        </div>
+        <div class="stat-label">{{ entry.group.name }}</div>
+        <div class="stat-value">{{ entry.user_count }}</div>
+        <div class="stat-sub">user{{ entry.user_count|pluralize }}</div>
+    </div>
+    {% empty %}
+    <div class="stat-card">
+        <div class="stat-label">No groups</div>
+        <div class="stat-value">0</div>
+        <div class="stat-sub">Run <code>setup_groups</code></div>
+    </div>
+    {% endfor %}
+</div>
+
+<!-- ── Group member tables ────────────────────────────────────────────── -->
+{% for entry in groups %}
+<div class="card" style="margin-bottom:1.25rem;">
+    <div class="card-head">
+        <div>
+            <div class="card-title">{{ entry.group.name|capfirst }}</div>
+            <div class="card-sub">{{ entry.user_count }} member{{ entry.user_count|pluralize }}</div>
+        </div>
+        <span class="badge badge-indigo">{{ entry.group.name }}</span>
+    </div>
+    <div class="card-body" style="padding:0;">
+        {% if entry.users %}
+        <table style="width:100%; border-collapse:collapse; font-size:.875rem;">
+            <thead>
+                <tr style="border-bottom:1px solid var(--border); background:#FAFAFA;">
+                    <th style="padding:.65rem 1.5rem; text-align:left; font-size:.75rem; font-weight:700; color:var(--muted); text-transform:uppercase; letter-spacing:.05em;">Username</th>
+                    <th style="padding:.65rem 1.5rem; text-align:left; font-size:.75rem; font-weight:700; color:var(--muted); text-transform:uppercase; letter-spacing:.05em;">Email</th>
+                    <th style="padding:.65rem 1.5rem; text-align:left; font-size:.75rem; font-weight:700; color:var(--muted); text-transform:uppercase; letter-spacing:.05em;">Status</th>
+                    {% if user.is_superuser or user.is_staff %}
+                    <th style="padding:.65rem 1.5rem; text-align:left; font-size:.75rem; font-weight:700; color:var(--muted); text-transform:uppercase; letter-spacing:.05em;">Flags</th>
+                    {% endif %}
+                </tr>
+            </thead>
+            <tbody>
+                {% for member in entry.users %}
+                <tr style="border-bottom:1px solid var(--border);">
+                    <td style="padding:.65rem 1.5rem; font-weight:600;">{{ member.username }}</td>
+                    <td style="padding:.65rem 1.5rem; color:var(--muted);">{{ member.email|default:"—" }}</td>
+                    <td style="padding:.65rem 1.5rem;">
+                        {% if member.is_active %}
+                            <span class="badge badge-green">Active</span>
+                        {% else %}
+                            <span class="badge" style="background:#FEF2F2;color:#991B1B;">Inactive</span>
+                        {% endif %}
+                    </td>
+                    {% if user.is_superuser or user.is_staff %}
+                    <td style="padding:.65rem 1.5rem; font-size:.75rem; color:var(--muted);">
+                        {% if member.is_superuser %}<span class="badge badge-indigo" style="margin-right:.2rem;">superuser</span>{% endif %}
+                        {% if member.is_staff %}<span class="badge badge-indigo">staff</span>{% endif %}
+                    </td>
+                    {% endif %}
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+        {% if entry.user_count > 10 %}
+        <div style="padding:.75rem 1.5rem; color:var(--muted); font-size:.8rem; border-top:1px solid var(--border);">
+            Showing 10 of {{ entry.user_count }} — use the User Management table above to see all.
+        </div>
+        {% endif %}
+        {% else %}
+        <div style="padding:1.5rem; color:var(--muted); font-size:.875rem;">No members yet.</div>
+        {% endif %}
+    </div>
+</div>
+{% endfor %}
+{% endblock %}

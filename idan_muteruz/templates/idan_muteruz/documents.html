@@ -1,0 +1,121 @@
+{% extends 'idan_muteruz/base.html' %}
+
+{% block title %}My Documents{% endblock %}
+{% block topbar_title %}My Documents{% endblock %}
+
+{% block content %}
+<div class="page-hdr">
+    <h1>Private documents</h1>
+    <p>Upload and manage your private PDF files. Only you can access them.</p>
+</div>
+
+<div class="grid-col-2">
+    <!-- Left: document list -->
+    <div>
+        <div class="card">
+            <div class="card-head">
+                <div>
+                    <div class="card-title">Your documents</div>
+                    <div class="card-sub">PDF files you have uploaded</div>
+                </div>
+            </div>
+            <div class="card-body">
+                {% if documents %}
+                    <table style="width:100%; border-collapse:collapse; font-size:.875rem;">
+                        <thead>
+                            <tr style="border-bottom:1px solid var(--border);">
+                                <th style="text-align:left; padding:.5rem .75rem; color:var(--muted); font-weight:600;">Name</th>
+                                <th style="text-align:left; padding:.5rem .75rem; color:var(--muted); font-weight:600;">Uploaded</th>
+                                <th style="text-align:right; padding:.5rem .75rem; color:var(--muted); font-weight:600;">Actions</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            {% for doc in documents %}
+                            <tr style="border-bottom:1px solid var(--border);">
+                                <td style="padding:.625rem .75rem;">
+                                    <span style="font-weight:500;">{{ doc.original_name }}</span>
+                                </td>
+                                <td style="padding:.625rem .75rem; color:var(--muted);">
+                                    {{ doc.uploaded_at|date:"d M Y, H:i" }}
+                                </td>
+                                <td style="padding:.625rem .75rem; text-align:right;">
+                                    <a href="{% url 'idan_muteruz:document_download' doc.pk %}"
+                                       class="btn btn-secondary"
+                                       style="font-size:.8rem; padding:.3rem .7rem; display:inline-block; margin-right:.4rem;">
+                                        Download
+                                    </a>
+                                    <form method="post"
+                                          action="{% url 'idan_muteruz:document_delete' doc.pk %}"
+                                          style="display:inline;"
+                                          onsubmit="return confirm('Delete {{ doc.original_name }}?');">
+                                        {% csrf_token %}
+                                        <button type="submit"
+                                                class="btn"
+                                                style="font-size:.8rem; padding:.3rem .7rem; background:var(--danger,#dc2626); color:white; border:none; cursor:pointer; border-radius:6px;">
+                                            Delete
+                                        </button>
+                                    </form>
+                                </td>
+                            </tr>
+                            {% endfor %}
+                        </tbody>
+                    </table>
+                {% else %}
+                    <p style="color:var(--muted); font-size:.875rem; text-align:center; padding:1.5rem 0;">
+                        No documents uploaded yet.
+                    </p>
+                {% endif %}
+            </div>
+        </div>
+    </div>
+
+    <!-- Right: upload form -->
+    <div>
+        <div class="card">
+            <div class="card-head">
+                <div>
+                    <div class="card-title">Upload a document</div>
+                    <div class="card-sub">PDF files only &mdash; max 5 MB</div>
+                </div>
+            </div>
+            <div class="card-body">
+                <form method="post"
+                      action="{% url 'idan_muteruz:document_upload' %}"
+                      enctype="multipart/form-data"
+                      novalidate>
+                    {% csrf_token %}
+                    <div class="fgroup">
+                        <label for="id_file" style="font-size:.875rem; font-weight:500;">Select PDF file</label>
+                        <input type="file"
+                               name="file"
+                               id="id_file"
+                               accept=".pdf"
+                               style="font-size:.875rem; margin-top:.4rem;">
+                        {% if upload_form.file.errors %}
+                            <div class="ferror">{{ upload_form.file.errors|striptags }}</div>
+                        {% endif %}
+                        <div style="font-size:.75rem; color:var(--muted); margin-top:.4rem;">
+                            Only PDF files are accepted. The file is validated server-side
+                            before storage &mdash; renaming a non-PDF file to <code>.pdf</code>
+                            will be detected and rejected.
+                        </div>
+                    </div>
+                    <button type="submit" class="btn btn-primary" style="width:100%; margin-top:.5rem;">
+                        Upload
+                    </button>
+                </form>
+            </div>
+        </div>
+
+        <div class="card" style="margin-top:1rem;">
+            <div class="card-head"><div class="card-title">Privacy</div></div>
+            <div class="card-body">
+                <p style="font-size:.85rem; color:var(--muted);">
+                    Your documents are stored privately. They are never accessible
+                    via a public URL and can only be downloaded by you when signed in.
+                </p>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}
